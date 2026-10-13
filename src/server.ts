@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 
 import { CanvasService } from "./canvas.ts";
 import type { Config } from "./config.ts";
+import { getDemoFixture, getDemoImage } from "./demo.ts";
 import { ApiError, invalidRequest, notFound, rateLimited } from "./errors.ts";
 import {
   clientOf,
@@ -109,6 +110,47 @@ const route = async (
         index === undefined ? "self" : "anywhere",
       ),
     });
+    return;
+  }
+
+  if ((path === "/demo" || path === "/demo.svg") && (method === "GET" || method === "HEAD")) {
+    const rawSample = query.get("sample");
+    const sample =
+      rawSample === "single" || rawSample === "1" || rawSample === "billing"
+        ? "single"
+        : "multi";
+    const demo = getDemoFixture(sample);
+
+    if (path === "/demo.svg") {
+      const theme = query.get("theme") === "dark" ? "dark" : "light";
+      const hero = heroSvg(demo.canvas, theme);
+      if (hero === undefined) throw notFound();
+
+      const etag = `"${hero.contentHash}"`;
+      if (headerOf(req, "if-none-match") === etag) {
+        res.writeHead(304, {
+          etag,
+          "cache-control": config.embedCacheControl,
+        });
+        res.end();
+        return;
+      }
+
+      sendText(res, 200, "image/svg+xml; charset=utf-8", hero.svg, {
+        "cache-control": config.embedCacheControl,
+        etag,
+      });
+      return;
+    }
+
+    const nonce = randomBytes(16).toString("base64");
+    sendText(
+      res,
+      200,
+      "text/html; charset=utf-8",
+      canvasPage(demo.canvas, nonce, { demoSample: sample }),
+      { "content-security-policy": pageCsp(nonce, "self") },
+    );
     return;
   }
 
@@ -227,7 +269,11 @@ const route = async (
   const image = IMAGE.exec(path);
   if (image?.[1] !== undefined && image[2] !== undefined) {
     if (method !== "GET" && method !== "HEAD") return notAllowed(res, "GET");
-    const svg = await service.image(image[1], image[2]);
+    const id = image[1];
+    const fileName = image[2];
+    const svg = id.startsWith("demo")
+      ? getDemoImage(fileName)
+      : await service.image(id, fileName);
     // A file name that is not the current revision's is simply not here; it is
     // never a stale picture served under a fresh name.
     if (svg === undefined) throw notFound();

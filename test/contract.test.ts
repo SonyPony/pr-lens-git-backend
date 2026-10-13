@@ -7,6 +7,7 @@ import { after, before, describe, it } from "node:test";
 import { payloadGraph } from "@coldtea/pr-lens-schema/examples";
 
 import { call, start, type Harness } from "./harness.ts";
+import { resolveProvenanceInfo } from "../src/page.ts";
 
 /**
  * The canvas contract, walked end to end the way the CLI walks it.
@@ -430,10 +431,13 @@ describe("the pages and the pictures", () => {
 
     assert.equal(response.status, 200);
     assert.match(response.headers.get("content-type") ?? "", /text\/html/);
-    assert.match(html, /<h1>/);
-    // Nothing off this origin: the only script is inline, with no src to fetch.
+    // Nothing off this origin: the only script is inline, with no src to fetch,
+    // and no assets (images, stylesheets, fonts) are loaded from elsewhere.
     assert.doesNotMatch(html, /<script[^>]*\ssrc=/i);
-    assert.doesNotMatch(html, /https?:\/\/(?!127\.0\.0\.1)/);
+    assert.doesNotMatch(
+      html,
+      /<(?:script|img|link|source)[^>]+https?:\/\/(?!127\.0\.0\.1)/i,
+    );
   });
 
   it("carries the theme switcher, and the state it needs to survive a reload", async () => {
@@ -554,6 +558,161 @@ describe("the pages and the pictures", () => {
       assert.equal(response.headers.get("cache-control"), "no-store", path);
     }
   });
+
+  it("renders streamlined provenance metadata in document and canvas modes", async () => {
+    const html = await (await fetch(`${harness.url}/c/${id}`)).text();
+    assert.match(html, /<h1>Send broadcasts in batches of 500<\/h1>/);
+    assert.match(html, /class="provenance"/);
+    assert.match(html, /ohansemmanuel\/bestregards #128/);
+    assert.match(html, /https:\/\/github\.com\/ohansemmanuel\/bestregards\/pull\/128/);
+    assert.match(html, /class="canvas-header-card"/);
+    assert.match(html, /class="canvas-header-title"[^>]*>Send broadcasts in batches of 500<\/div>/);
+    assert.match(html, /class="canvas-header-meta"[^>]*>Revision 1 &middot; \d+ diagrams<\/span>/);
+    assert.match(html, /<p class="rev">Revision 1 &middot; \d+ diagrams<\/p>/);
+  });
+
+  it("gracefully falls back when provenance information is partially missing", () => {
+    const withBranch = resolveProvenanceInfo("c-1", "Default Title", {
+      repo: { owner: "acme", name: "widgets" },
+      head: { ref: "fix-bug" },
+    });
+    assert.equal(withBranch.mrTitle, "Default Title");
+    assert.match(withBranch.row2Content, /acme\/widgets \(fix-bug\)/);
+
+    const withRepoOnly = resolveProvenanceInfo("c-2", "Default Title", {
+      repo: { owner: "acme", name: "widgets" },
+    });
+    assert.match(withRepoOnly.row2Content, /acme\/widgets/);
+
+    const withPrOnly = resolveProvenanceInfo("c-3", "Default Title", {
+      pullRequest: { number: 42, url: "https://example.com/pr/42" },
+    });
+    assert.match(withPrOnly.row2Content, /#42/);
+
+    const withBranchOnly = resolveProvenanceInfo("c-4", "Default Title", {
+      head: { ref: "main" },
+    });
+    assert.match(withBranchOnly.row2Content, /main/);
+  });
+
+  it("serves the demo page at /demo with sample architectures and sample switcher", async () => {
+    const response = await fetch(`${harness.url}/demo`);
+    assert.equal(response.status, 200);
+    const html = await response.text();
+
+    assert.match(html, /class="demo-banner"/);
+    assert.match(html, /<h1>feat\(helm\): let the ingress answer on more than one host<\/h1>/);
+    assert.match(html, /thejoeejoee\/pr-lens-git-backend #17/);
+    assert.match(html, /https:\/\/github\.com\/thejoeejoee\/pr-lens-git-backend\/pull\/17/);
+    assert.match(html, /href="\/demo\?sample=single"/);
+    assert.match(html, /href="\/demo\?sample=multi"/);
+
+    // Default is multi (6 diagrams)
+    assert.match(html, /Revision 1 &middot; 6 diagrams/);
+
+    // Switch to single diagram sample (1 diagram)
+    const singleHtml = await (await fetch(`${harness.url}/demo?sample=single`)).text();
+    assert.match(singleHtml, /Revision 1 &middot; 1 diagram/);
+    assert.match(singleHtml, /Multi-Host Ingress Architecture/);
+    assert.match(singleHtml, /thejoeejoee\/pr-lens-git-backend/);
+  });
+
+  it("serves /demo.svg with etag and 304 revalidation", async () => {
+    const response = await fetch(`${harness.url}/demo.svg`);
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type") ?? "", /image\/svg\+xml/);
+    const etag = response.headers.get("etag");
+    assert.ok(etag !== null);
+
+    const reval = await fetch(`${harness.url}/demo.svg`, {
+      headers: { "if-none-match": etag },
+    });
+    assert.equal(reval.status, 304);
+  });
+
+  it("serves demo content-addressed pictures", async () => {
+    const demoHtml = await (await fetch(`${harness.url}/demo`)).text();
+    const match = /src="(\/images\/demo-multi\/[^"]+)"/.exec(demoHtml);
+    assert.ok(match !== null, "demo page contains image reference");
+
+    const imgResponse = await fetch(`${harness.url}${match[1]}`);
+    assert.equal(imgResponse.status, 200);
+    assert.match(imgResponse.headers.get("content-type") ?? "", /image\/svg\+xml/);
+    assert.match(await imgResponse.text(), /^<svg/);
+  });
+
+  it("renders interactive figures with diagram indices and interactive badges", async () => {
+    const html = await (await fetch(`${harness.url}/c/${id}`)).text();
+    assert.match(html, /class="interactive-figure"/);
+    assert.match(html, /data-diagram-index="0"/);
+    assert.match(html, /class="figure-hint"/);
+  });
+
+  it("serves the lightbox dialog, pan-zoom controls, and cheatsheet help modal", async () => {
+    const html = await (await fetch(`${harness.url}/c/${id}`)).text();
+
+    // Lightbox modal markup
+    assert.match(html, /<dialog class="lightbox" id="lightbox"/);
+    assert.match(html, /id="lightbox-stage"/);
+    assert.match(html, /id="lightbox-canvas"/);
+    assert.match(html, /id="lb-zoom-pill"/);
+    assert.match(html, /id="lb-prev"/);
+    assert.match(html, /id="lb-next"/);
+    assert.match(html, /id="lb-close"/);
+
+    // Help cheatsheet dialog markup
+    assert.match(html, /<dialog class="help-dialog" id="help-dialog"/);
+    assert.match(html, /Shortcuts &amp; Gestures/);
+    assert.match(html, /scroll or pinch/);
+    assert.match(html, /drag/);
+    assert.match(html, /<kbd>←<\/kbd>\s*<kbd>→<\/kbd>/);
+    assert.match(html, /<kbd>1<\/kbd>/);
+    assert.match(html, /<kbd>0<\/kbd>/);
+    assert.match(html, /<kbd>Esc<\/kbd>/);
+
+    // Embedded diagram tiles data script
+    assert.match(html, /<script id="pr-lens-tiles" type="application\/json"/);
+
+    // Nonced client wiring with pointer, wheel, and keyboard listeners
+    assert.match(html, /setPointerCapture/);
+    assert.match(html, /addEventListener\("wheel"/);
+    assert.match(html, /addEventListener\("keydown"/);
+    assert.match(html, /ArrowLeft/);
+    assert.match(html, /ArrowRight/);
+  });
+
+  it("carries view mode switcher and boots with zero layout shift", async () => {
+    const html = await (await fetch(`${harness.url}/c/${id}`)).text();
+
+    // Mode switcher buttons
+    assert.match(html, /data-mode-choice="document"/);
+    assert.match(html, /data-mode-choice="canvas"/);
+
+    // Boot script in <head> checks both theme and view-mode
+    const head = html.slice(0, html.indexOf("</head>"));
+    assert.match(head, /localStorage\.getItem\("pr-lens-view-mode"\)/);
+    assert.match(head, /dataset\.viewMode/);
+  });
+
+  it("serves the interactive canvas workspace with dock and caption pill", async () => {
+    const html = await (await fetch(`${harness.url}/c/${id}`)).text();
+
+    assert.match(html, /id="canvas-workspace"/);
+    assert.match(html, /id="canvas-stage"/);
+    assert.match(html, /id="canvas-diagram-container"/);
+    assert.match(html, /id="canvas-caption-pill"/);
+    assert.match(html, /id="canvas-dock"/);
+    assert.match(html, /class="dock-item/);
+    assert.match(html, /id="canvas-zoom-pill"/);
+  });
+
+  it("renders responsive picture elements with intrinsic dimensions for vector sharpness", async () => {
+    const html = await (await fetch(`${harness.url}/c/${id}`)).text();
+
+    assert.match(html, /id="canvas-diagram-body"[^>]*>[\s\S]*?<picture>/);
+    assert.match(html, /<img src="\/images\/[^"]+" width="\d+" height="\d+"/);
+    assert.match(html, /media="\(prefers-color-scheme: dark\)"/);
+  });
 });
 
 describe("the index page", () => {
@@ -667,6 +826,12 @@ describe("the index page", () => {
     } finally {
       await quiet.close();
     }
+  });
+
+  it("includes a link to /demo", async () => {
+    const html = await (await fetch(harness.url + "/")).text();
+    assert.match(html, /href="\/demo"/);
+    assert.match(html, /Try the interactive demo/);
   });
 });
 
