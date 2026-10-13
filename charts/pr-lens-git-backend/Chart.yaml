@@ -2,8 +2,8 @@ apiVersion: v2
 name: pr-lens-git-backend
 description: A lightweight PR Lens canvas server, with a git repository as the store
 type: application
-version: 0.7.0
-appVersion: 0.7.0
+version: 0.8.0
+appVersion: 0.8.0
 kubeVersion: '>=1.25.0-0'
 home: https://github.com/thejoeejoee/pr-lens-git-backend
 sources:

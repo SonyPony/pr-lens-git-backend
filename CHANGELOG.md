@@ -4,6 +4,28 @@ Kept by [release-please](https://github.com/googleapis/release-please) from the
 conventional-commit subjects on `main`. Everything below 0.3.0 was written by
 hand, because the two releases before it predate that setup.
 
+## [0.8.0](https://github.com/thejoeejoee/pr-lens-git-backend/compare/v0.7.0...v0.8.0) (2026-10-13)
+
+
+### Features
+
+* **canvas:** interactive dot-grid canvas workspace and dock switcher ([0206804](https://github.com/thejoeejoee/pr-lens-git-backend/commit/020680456c30436093944c60575873b508613591))
+* interactive diagrams with canvas workspace, lightbox, and demo route ([dfc3061](https://github.com/thejoeejoee/pr-lens-git-backend/commit/dfc3061e90bf8cbdb1dd0f5cd0129ef0e28bdcd9))
+* **lightbox:** interactive pan-zoom lightbox modal and cheatsheet help dialog ([758f859](https://github.com/thejoeejoee/pr-lens-git-backend/commit/758f8594ab857d16d39b6596a4a098d79a5d6c88))
+* **provenance-demo:** render provenance metadata and add /demo route ([a1e0bef](https://github.com/thejoeejoee/pr-lens-git-backend/commit/a1e0bef093bfcd57673261f4559335e34a889331))
+
+
+### Bug Fixes
+
+* **deps:** bump @coldtea/pr-lens-renderer from 0.2.6 to 0.3.2 ([cdbe692](https://github.com/thejoeejoee/pr-lens-git-backend/commit/cdbe69228125a78b88b3dbae2b8508cba24c5e2b))
+* **deps:** bump @coldtea/pr-lens-renderer from 0.2.6 to 0.3.2 ([b8dc43b](https://github.com/thejoeejoee/pr-lens-git-backend/commit/b8dc43bc8d9fb5ead0d1f1477b42ebe2c954b266))
+* **deps:** bump @coldtea/pr-lens-schema from 0.4.0 to 0.7.0 ([9a488d8](https://github.com/thejoeejoee/pr-lens-git-backend/commit/9a488d8db4db54ed800b8fdb16334ae1861d77f6))
+* **deps:** bump @coldtea/pr-lens-schema from 0.4.0 to 0.7.0 ([aac01ea](https://github.com/thejoeejoee/pr-lens-git-backend/commit/aac01ea1c08fb1afc77a2ba5485f9e71c94e3929))
+* **deps:** bump marked from 18.0.13 to 18.1.0 ([e952fae](https://github.com/thejoeejoee/pr-lens-git-backend/commit/e952fae040697fd33b67cd18bd706287bdd052cb))
+* **deps:** bump marked from 18.0.13 to 18.1.0 ([952944b](https://github.com/thejoeejoee/pr-lens-git-backend/commit/952944b88db303f6b6a4ca3f7432c5658f58bccb))
+* **deps:** bump varnish from 9.0.3 to 9.1.0.2 in /charts/pr-lens-git-backend ([8d53cfb](https://github.com/thejoeejoee/pr-lens-git-backend/commit/8d53cfb0c3c4ca556c38591e10ab53a16a5811c1))
+* **deps:** bump varnish in /charts/pr-lens-git-backend ([9e1df9d](https://github.com/thejoeejoee/pr-lens-git-backend/commit/9e1df9d94ef2737435f52a42c0d8ae9d3cc61a9a))
+
 ## [0.7.0](https://github.com/thejoeejoee/pr-lens-git-backend/compare/v0.6.0...v0.7.0) (2026-09-24)
 
 
