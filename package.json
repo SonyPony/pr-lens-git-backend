@@ -50,7 +50,7 @@
   },
   "dependencies": {
     "@coldtea/pr-lens-renderer": "^0.3.2",
-    "@coldtea/pr-lens-schema": "^0.4.0",
+    "@coldtea/pr-lens-schema": "^0.7.0",
     "marked": "^18.0.13"
   },
   "devDependencies": {
