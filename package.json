@@ -1,6 +1,6 @@
 {
   "name": "pr-lens-git-backend",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "A lightweight PR Lens canvas server: version 1 of the canvas API, with a git repository as the store.",
   "keywords": [
     "pr-lens",

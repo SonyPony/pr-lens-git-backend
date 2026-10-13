@@ -26,7 +26,7 @@ instead, as [connect a remote](connect-a-remote.md#over-ssh-with-a-key) shows.
 <!-- x-release-please-start-version -->
 ```bash
 helm install lens oci://ghcr.io/thejoeejoee/charts/pr-lens-git-backend \
-  --version 0.7.0 \
+  --version 0.8.0 \
   --set secretName=pr-lens-git \
   --set config.git.remote=https://gitlab.example.com/platform/pr-lens-canvases.git \
   --set config.publicUrl=https://lens.example.com \
