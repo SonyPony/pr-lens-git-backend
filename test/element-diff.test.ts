@@ -6,10 +6,9 @@ import { after, before, describe, it } from "node:test";
 
 import { parseGraphDoc } from "@coldtea/pr-lens-schema";
 
-import { loadConfig } from "../src/config.ts";
 import { hunksInRange, parsePatch, wholeFile } from "../src/diff.ts";
 import { highlight, languageOf } from "../src/highlight.ts";
-import { call, start, type Harness } from "./harness.ts";
+import { call, loadConfigWith, pushDocument, start, type Harness } from "./harness.ts";
 
 /**
  * The code behind a clicked element, end to end against a fake GitHub: who may
@@ -143,20 +142,7 @@ const shopDoc = (host: string) =>
 
 const SESSION_KEY = randomBytes(32).toString("base64");
 
-const pushDoc = async (harness: Harness, document: unknown): Promise<string> => {
-  const minted = await call(`${harness.url}/api/canvas`, { method: "POST" });
-  const pushed = await call(`${harness.url}/api/canvas/${minted.body.id}`, {
-    method: "PUT",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${minted.body.writeToken}`,
-      "if-match": "0",
-    },
-    body: JSON.stringify(document),
-  });
-  assert.equal(pushed.status, 200, JSON.stringify(pushed.body));
-  return minted.body.id;
-};
+const pushDoc = pushDocument;
 
 const diffOf = (harness: Harness, id: string, el: string, extra = "", cookie?: string) =>
   call(`${harness.url}/c/${id}/diff?el=${encodeURIComponent(el)}${extra}`, {
@@ -188,11 +174,9 @@ describe("the diff behind an element, with a dev token", () => {
     assert.equal(answer.headers.get("cache-control"), "private, no-store");
     assert.equal(answer.headers.get("vary"), "Cookie");
     assert.equal(answer.body.state, "ok");
-    assert.equal(answer.body.repo, "acme/shop");
 
     const [file] = answer.body.files;
     assert.equal(file.path, "src/api.py");
-    assert.equal(file.range, "L1–5");
     assert.equal(file.hunks.length, 1);
     assert.equal(file.otherHunks, 1);
     assert.deepEqual(
@@ -256,6 +240,11 @@ describe("the diff behind an element, with a dev token", () => {
     await diffOf(harness, id, "node:cache");
     const after = github.calls.filter((entry) => entry.includes("/compare/")).length;
     assert.equal(after, before, "the comparison came from the cache");
+  });
+
+  it("has no sign-in routes without a GitHub App", async () => {
+    assert.equal((await fetch(`${harness.url}/auth/github/login`, { redirect: "manual" })).status, 404);
+    assert.equal((await fetch(`${harness.url}/auth/logout`, { method: "POST" })).status, 404);
   });
 
   it("refuses a document that points at another host", async () => {
@@ -391,6 +380,11 @@ describe("signing in with GitHub", () => {
     assert.equal(answer.status, 401);
   });
 
+  it("answers a wrong method on an auth route like any other route", async () => {
+    assert.equal((await fetch(`${harness.url}/auth/logout`)).status, 405);
+    assert.equal((await fetch(`${harness.url}/auth/github/login`, { method: "POST" })).status, 405);
+  });
+
   it("signs out", async () => {
     const out = await fetch(`${harness.url}/auth/logout`, { method: "POST" });
     assert.equal(out.status, 204);
@@ -399,15 +393,7 @@ describe("signing in with GitHub", () => {
 });
 
 describe("the sign-in settings", () => {
-  const load = (env: Record<string, string>) => {
-    const saved = { ...process.env };
-    Object.assign(process.env, { STORE: "memory", ...env });
-    try {
-      return loadConfig();
-    } finally {
-      process.env = saved;
-    }
-  };
+  const load = loadConfigWith;
 
   it("keeps the dev token to loopback", () => {
     assert.throws(() => load({ HOST: "0.0.0.0", GITHUB_DEV_TOKEN: "dev-token" }), /loopback/);

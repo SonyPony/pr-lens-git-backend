@@ -1,3 +1,4 @@
+import type { GitHubConfig } from "./config.ts";
 import { VERSION } from "./version.ts";
 
 /**
@@ -9,14 +10,7 @@ import { VERSION } from "./version.ts";
  * code change.
  */
 
-export type GitHubSettings = {
-  /** REST API root, `https://api.github.com` for github.com. */
-  apiUrl: string;
-  /** Web root, where the sign-in pages live: `https://github.com`. */
-  webUrl: string;
-  /** Ceiling on one call, so a slow GitHub never holds a request open. */
-  timeoutMs: number;
-};
+export type GitHubSettings = Pick<GitHubConfig, "apiUrl" | "webUrl" | "timeoutMs">;
 
 /** One changed file of a comparison, as much of it as the panel uses. */
 export type ComparedFile = {
@@ -40,7 +34,8 @@ export class GitHubError extends Error {
 }
 
 /** Largest file the whole-file view will fetch. */
-export const MAX_FILE_BYTES = 1_000_000;
+const MAX_FILE_BYTES = 1_000_000;
+const USER_AGENT = `pr-lens-git-backend/${VERSION}`;
 
 export class GitHubClient {
   readonly #settings: GitHubSettings;
@@ -58,7 +53,7 @@ export class GitHubClient {
       headers: {
         accept,
         authorization: `Bearer ${token}`,
-        "user-agent": `pr-lens-git-backend/${VERSION}`,
+        "user-agent": USER_AGENT,
         "x-github-api-version": "2022-11-28",
       },
       signal: AbortSignal.timeout(this.#settings.timeoutMs),
@@ -81,7 +76,7 @@ export class GitHubClient {
   /** Whether the token can read the repository; false on GitHub's 403 and 404 alike. */
   async canRead(token: string, owner: string, repo: string): Promise<boolean> {
     try {
-      await this.#call(token, `/repos/${segment(owner)}/${segment(repo)}`);
+      await this.#call(token, `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`);
       return true;
     } catch (error) {
       if (error instanceof GitHubError && (error.status === 403 || error.status === 404)) return false;
@@ -92,7 +87,7 @@ export class GitHubClient {
   /** The files that changed between two commits; GitHub lists at most 300. */
   async compare(token: string, owner: string, repo: string, base: string, head: string): Promise<Comparison> {
     const body = (await (
-      await this.#call(token, `/repos/${segment(owner)}/${segment(repo)}/compare/${segment(base)}...${segment(head)}`)
+      await this.#call(token, `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`)
     ).json()) as { files?: Array<Record<string, unknown>> };
 
     return {
@@ -112,7 +107,7 @@ export class GitHubClient {
   async file(token: string, owner: string, repo: string, path: string, ref: string): Promise<string | undefined> {
     const response = await this.#call(
       token,
-      `/repos/${segment(owner)}/${segment(repo)}/contents/${path.split("/").map(segment).join("/")}?ref=${encodeURIComponent(ref)}`,
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(ref)}`,
       "application/vnd.github.raw+json",
     );
     const declared = Number(response.headers.get("content-length") ?? "");
@@ -138,7 +133,7 @@ export class GitHubClient {
       headers: {
         accept: "application/json",
         "content-type": "application/json",
-        "user-agent": `pr-lens-git-backend/${VERSION}`,
+        "user-agent": USER_AGENT,
       },
       body: JSON.stringify({
         client_id: input.clientId,
@@ -159,6 +154,3 @@ export class GitHubClient {
     };
   }
 }
-
-/** One path segment, so an owner or a ref can never step into another route. */
-const segment = (value: string): string => encodeURIComponent(value);

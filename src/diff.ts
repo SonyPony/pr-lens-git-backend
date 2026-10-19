@@ -1,8 +1,9 @@
-import { createHash } from "node:crypto";
+import type { Provenance } from "@coldtea/pr-lens-schema";
 
-import type { GitHubClient, Comparison } from "./github.ts";
+import type { ClickableElement } from "./elements.ts";
+import { GitHubError, type Comparison, type GitHubClient } from "./github.ts";
 import { highlight, languageOf, type Token } from "./highlight.ts";
-import type { ClickableElement } from "./page.ts";
+import { hashToken } from "./secrets.ts";
 
 /**
  * What a click on a diagram element shows: the code it stands for, as it
@@ -90,16 +91,13 @@ export const hunksInRange = (
   });
 };
 
-/** A line of the whole-file view: `n` on the new side, `o` for a removed line on the old. */
-export type FullLine = { t: "+" | "-" | " "; n?: number; o?: number; s: string; h?: Token[] };
-
 /**
  * A whole file with its changes woven in: every line of the new version, the
  * added ones marked, and each removed line placed just before the line that
  * followed it. For a file the change deleted, `text` is the old version and
  * every line is marked removed.
  */
-export const wholeFile = (text: string, hunks: readonly Hunk[], deleted: boolean): FullLine[] => {
+export const wholeFile = (text: string, hunks: readonly Hunk[], deleted: boolean): DiffLine[] => {
   const lines = text.endsWith("\n") ? text.slice(0, -1).split("\n") : text.split("\n");
   if (deleted) return lines.map((s, index) => ({ t: "-", o: index + 1, s }));
 
@@ -122,22 +120,32 @@ export const wholeFile = (text: string, hunks: readonly Hunk[], deleted: boolean
     if (pending.length > 0) removedBefore.set(nextNew, [...(removedBefore.get(nextNew) ?? []), ...pending]);
   }
 
-  const out: FullLine[] = [];
+  const out: DiffLine[] = [];
   for (let n = 1; n <= lines.length + 1; n += 1) {
-    for (const removed of removedBefore.get(n) ?? [])
-      out.push(removed.o === undefined ? { t: "-", s: removed.s } : { t: "-", o: removed.o, s: removed.s });
+    for (const removed of removedBefore.get(n) ?? []) out.push({ t: "-", o: removed.o, s: removed.s });
     if (n <= lines.length) out.push({ t: added.has(n) ? "+" : " ", n, s: lines[n - 1] ?? "" });
   }
   return out;
 };
 
+/**
+ * Colours lines from the files they belong to: a removed line from the old
+ * version by its old number, any other line from the new version by its new one.
+ */
+const attach = (lines: readonly DiffLine[], newer: Token[][] | undefined, older: Token[][] | undefined): void => {
+  for (const line of lines) {
+    const tokens =
+      line.t === "-"
+        ? line.o === undefined ? undefined : older?.[line.o - 1]
+        : line.n === undefined ? undefined : newer?.[line.n - 1];
+    if (tokens !== undefined) line.h = tokens;
+  }
+};
+
 export type FileDiff = {
   path: string;
-  previousPath?: string;
   /** GitHub's word for it, or "unchanged" when the comparison does not list the file. */
   status: string;
-  /** The range the document points at, e.g. "L3–9", when it names one. */
-  range?: string;
   url: string;
   hunks: Hunk[];
   /** Hunks of this file outside the element's range, not shown. */
@@ -147,82 +155,165 @@ export type FileDiff = {
 };
 
 export type DiffAnswer =
-  | { state: "ok"; viewer: string | undefined; repo: string; files: FileDiff[] }
-  | {
-      state: "ok-full";
-      viewer: string | undefined;
-      path: string;
-      url: string;
-      lines: FullLine[] | undefined;
-    }
+  | { state: "ok"; viewer: string | undefined; files: FileDiff[] }
+  | { state: "ok-full"; lines: DiffLine[] | undefined }
   | { state: "signin"; loginUrl: string | undefined }
   | { state: "no-access"; repo: string; viewer: string | undefined }
   | { state: "unavailable"; reason: string };
 
-export type Provenance = {
-  repo: { owner: string; name: string; host: string };
-  base: { sha: string };
-  head: { sha: string };
-};
+/** What the service answers: a DiffAnswer, or GitHub turning the reader's token away. */
+export type DiffResult = DiffAnswer | { state: "rejected" };
 
 const ACCESS_OK_MS = 5 * 60_000;
 const ACCESS_DENIED_MS = 60_000;
-const MAX_COMPARISONS = 200;
-/** Highlighted files held at once; each is one file at one commit, so it never goes stale. */
-const MAX_FILES = 300;
+/** Readers' access answers held at once; past it, expired ones go first, then the oldest. */
+const MAX_ACCESS = 10_000;
+const COMPARISON_BUDGET = 32_000_000;
+const FILE_BUDGET = 64_000_000;
+/** Rough heap cost of one token: two short strings, a number and an array. */
+const TOKEN_BYTES = 64;
 
 /**
- * One promise per key, so concurrent clicks share a fetch; the oldest key goes
- * first once the map is full, and a failure is forgotten so the next click
- * asks again.
+ * Promises by key under a byte budget, least recently used out first. A
+ * failure is forgotten, so the next click asks again, and concurrent clicks
+ * share one fetch.
  */
-const remember = <T>(cache: Map<string, Promise<T>>, key: string, limit: number, make: () => Promise<T>): Promise<T> => {
-  const held = cache.get(key);
-  if (held !== undefined) return held;
-  const pending = make();
-  pending.catch(() => cache.delete(key));
-  cache.set(key, pending);
-  if (cache.size > limit) {
-    const oldest = cache.keys().next().value;
-    if (oldest !== undefined) cache.delete(oldest);
+class BudgetCache<T> {
+  readonly #entries = new Map<string, { value: Promise<T>; bytes: number }>();
+  readonly #budget: number;
+  readonly #sizeOf: (value: T) => number;
+  #total = 0;
+
+  constructor(budget: number, sizeOf: (value: T) => number) {
+    this.#budget = budget;
+    this.#sizeOf = sizeOf;
   }
-  return pending;
-};
+
+  get(key: string, make: () => Promise<T>): Promise<T> {
+    const held = this.#entries.get(key);
+    if (held !== undefined) {
+      this.#entries.delete(key);
+      this.#entries.set(key, held);
+      return held.value;
+    }
+    const entry = { value: make(), bytes: 0 };
+    this.#entries.set(key, entry);
+    entry.value.then(
+      (value) => {
+        if (this.#entries.get(key) !== entry) return;
+        entry.bytes = this.#sizeOf(value);
+        this.#total += entry.bytes;
+        for (const [oldest, held] of this.#entries) {
+          if (this.#total <= this.#budget) break;
+          this.#entries.delete(oldest);
+          this.#total -= held.bytes;
+        }
+      },
+      () => {
+        if (this.#entries.get(key) === entry) this.#entries.delete(key);
+      },
+    );
+    return entry.value;
+  }
+}
+
+type HeldFile = { text: string | undefined; tokens: Token[][] | undefined };
 
 const hasLines = (hunks: readonly Hunk[], kinds: readonly DiffLine["t"][]): boolean =>
   hunks.some((hunk) => hunk.lines.some((line) => kinds.includes(line.t)));
 
 /**
- * Per-reader access answers, and shared comparisons and file contents.
+ * The code behind an element, for one reader.
  *
  * A comparison, or a file at a commit, is the same bytes for every reader and
  * never changes, so one fetch serves everybody — but only ever after that
- * reader's own access check has passed, which is why the access cache is kept
- * apart from the others.
+ * reader's own access check has passed, which is why access answers are kept
+ * per reader and apart from the shared caches, and why `answer` is the only
+ * way in.
  */
 export class DiffService {
   readonly #github: GitHubClient;
+  /** The only host whose changes can be shown: the one readers sign in to. */
+  readonly #host: string;
   readonly #access = new Map<string, { ok: boolean; until: number }>();
-  readonly #comparisons = new Map<string, Promise<Comparison>>();
-  readonly #files = new Map<string, Promise<{ text: string | undefined; tokens: Token[][] | undefined }>>();
+  readonly #comparisons = new BudgetCache<Comparison>(COMPARISON_BUDGET, (comparison) =>
+    comparison.files.reduce((sum, file) => sum + 2 * (file.patch?.length ?? 0) + 200, 0),
+  );
+  readonly #files = new BudgetCache<HeldFile>(FILE_BUDGET, (file) =>
+    2 * (file.text?.length ?? 0) + TOKEN_BYTES * (file.tokens?.reduce((sum, line) => sum + line.length, 0) ?? 0),
+  );
 
   constructor(github: GitHubClient) {
     this.#github = github;
+    this.#host = new URL(github.webUrl).host;
+  }
+
+  /**
+   * The element's changed lines, or with `full` one of its files whole. Undefined
+   * when `full` is not one of the element's own files.
+   */
+  async answer(
+    reader: { token: string; viewer: string | undefined },
+    provenance: Provenance,
+    element: ClickableElement,
+    full: string | null,
+  ): Promise<DiffResult | undefined> {
+    if (provenance.repo.host !== this.#host)
+      return { state: "unavailable", reason: `Only changes on ${this.#host} can be shown.` };
+    const { owner, name } = provenance.repo;
+    try {
+      if (!(await this.#canRead(reader.token, owner, name)))
+        return { state: "no-access", repo: `${owner}/${name}`, viewer: reader.viewer };
+      return full === null
+        ? await this.#changes(reader.token, reader.viewer, provenance, element)
+        : await this.#whole(reader.token, provenance, element, full);
+    } catch (error) {
+      if (!(error instanceof GitHubError)) throw error;
+      if (error.status === 401) return { state: "rejected" };
+      return { state: "unavailable", reason: `GitHub could not show these changes (${error.status}).` };
+    }
+  }
+
+  async #canRead(token: string, owner: string, name: string): Promise<boolean> {
+    const key = `${hashToken(token)}|${owner}/${name}`.toLowerCase();
+    const now = Date.now();
+    const cached = this.#access.get(key);
+    if (cached !== undefined && cached.until > now) return cached.ok;
+    this.#access.delete(key);
+
+    const ok = await this.#github.canRead(token, owner, name);
+    if (this.#access.size >= MAX_ACCESS) {
+      for (const [stale, entry] of this.#access) if (entry.until <= now) this.#access.delete(stale);
+      const oldest = this.#access.keys().next().value;
+      if (this.#access.size >= MAX_ACCESS && oldest !== undefined) this.#access.delete(oldest);
+    }
+    this.#access.set(key, { ok, until: now + (ok ? ACCESS_OK_MS : ACCESS_DENIED_MS) });
+    return ok;
+  }
+
+  #compare(token: string, provenance: Provenance): Promise<Comparison> {
+    const { repo, base, head } = provenance;
+    return this.#comparisons.get(`${repo.owner}/${repo.name}@${base.sha}...${head.sha}`.toLowerCase(), () =>
+      this.#github.compare(token, repo.owner, repo.name, base.sha, head.sha),
+    );
   }
 
   /** A file at a commit, and its colours. Undefined text for a file too large to fetch. */
-  #file(token: string, provenance: Provenance, sha: string, path: string) {
+  #file(token: string, provenance: Provenance, sha: string, path: string): Promise<HeldFile> {
     const { owner, name } = provenance.repo;
-    return remember(this.#files, `${owner}/${name}@${sha}:${path}`.toLowerCase(), MAX_FILES, async () => {
+    return this.#files.get(`${owner}/${name}@${sha}:${path}`.toLowerCase(), async () => {
       const text = await this.#github.file(token, owner, name, path, sha);
       return { text, tokens: text === undefined ? undefined : await highlight(path, text) };
     });
   }
 
+  #blobUrl(provenance: Provenance, sha: string, path: string): string {
+    return `${this.#github.webUrl}/${provenance.repo.owner}/${provenance.repo.name}/blob/${sha}/${path}`;
+  }
+
   /**
-   * Colours for the shown hunks: new-side lines from the new file, removed lines
-   * from the old one. Best effort — a file that will not fetch or colour is
-   * shown plain, never as an error.
+   * Colours for the shown hunks. Best effort: a file that will not fetch or
+   * colour is shown plain, never as an error.
    */
   async #colour(token: string, provenance: Provenance, changed: Comparison["files"][number], hunks: Hunk[]): Promise<void> {
     if (hunks.length === 0 || languageOf(changed.filename) === undefined) return;
@@ -235,121 +326,79 @@ export class DiffService {
           ? this.#file(token, provenance, provenance.base.sha, changed.previousFilename ?? changed.filename)
           : undefined,
       ]);
-      for (const hunk of hunks)
-        for (const line of hunk.lines) {
-          const tokens =
-            line.t === "-"
-              ? line.o === undefined ? undefined : older?.tokens?.[line.o - 1]
-              : line.n === undefined ? undefined : newer?.tokens?.[line.n - 1];
-          if (tokens !== undefined) line.h = tokens;
-        }
+      for (const hunk of hunks) attach(hunk.lines, newer?.tokens, older?.tokens);
     } catch {
       // Plain text it is.
     }
   }
 
-  async canRead(token: string, owner: string, name: string): Promise<boolean> {
-    const key = `${createHash("sha256").update(token).digest("hex")}|${owner}/${name}`.toLowerCase();
-    const cached = this.#access.get(key);
-    if (cached !== undefined && cached.until > Date.now()) return cached.ok;
-    const ok = await this.#github.canRead(token, owner, name);
-    this.#access.set(key, { ok, until: Date.now() + (ok ? ACCESS_OK_MS : ACCESS_DENIED_MS) });
-    return ok;
-  }
-
-  #compare(token: string, provenance: Provenance): Promise<Comparison> {
-    const { repo, base, head } = provenance;
-    return remember(
-      this.#comparisons,
-      `${repo.owner}/${repo.name}@${base.sha}...${head.sha}`.toLowerCase(),
-      MAX_COMPARISONS,
-      () => this.#github.compare(token, repo.owner, repo.name, base.sha, head.sha),
-    );
-  }
-
-  /** The element's files as hunks; the caller has already checked access. */
-  async element(
+  async #changes(
     token: string,
     viewer: string | undefined,
     provenance: Provenance,
     element: ClickableElement,
   ): Promise<DiffAnswer> {
     const comparison = await this.#compare(token, provenance);
-    const { repo } = provenance;
-    const files = await Promise.all(element.files.map(async (file): Promise<FileDiff> => {
-      const oldSide = file.revision === "base" || element.delta === "removed";
-      const changed = comparison.files.find(
-        (candidate) =>
-          candidate.filename === file.path || (oldSide && candidate.previousFilename === file.path),
-      );
-      const sha = oldSide ? provenance.base.sha : provenance.head.sha;
-      const range =
-        file.startLine === undefined
-          ? undefined
-          : `L${file.startLine}${file.endLine !== undefined && file.endLine !== file.startLine ? `–${file.endLine}` : ""}`;
-      const url = `${this.#github.webUrl}/${repo.owner}/${repo.name}/blob/${sha}/${file.path}`;
+    const files = await Promise.all(
+      element.files.map(async (file): Promise<FileDiff> => {
+        const oldSide = file.revision === "base" || element.delta === "removed";
+        const changed = comparison.files.find(
+          (candidate) => candidate.filename === file.path || (oldSide && candidate.previousFilename === file.path),
+        );
+        const url = this.#blobUrl(provenance, oldSide ? provenance.base.sha : provenance.head.sha, file.path);
+        if (changed === undefined)
+          return { path: file.path, status: "unchanged", url, hunks: [], otherHunks: 0, noPatch: false };
 
-      if (changed === undefined)
-        return { path: file.path, status: "unchanged", range, url, hunks: [], otherHunks: 0, noPatch: false };
-
-      const all = changed.patch === undefined ? [] : parsePatch(changed.patch);
-      const shown = hunksInRange(all, oldSide ? "old" : "new", file.startLine, file.endLine);
-      await this.#colour(token, provenance, changed, shown);
-      return {
-        path: file.path,
-        ...(changed.previousFilename === undefined ? {} : { previousPath: changed.previousFilename }),
-        status: changed.status,
-        range,
-        url,
-        hunks: shown,
-        otherHunks: all.length - shown.length,
-        noPatch: changed.patch === undefined,
-      };
-    }));
-    return { state: "ok", viewer, repo: `${repo.owner}/${repo.name}`, files };
+        const all = changed.patch === undefined ? [] : parsePatch(changed.patch);
+        const shown = hunksInRange(all, oldSide ? "old" : "new", file.startLine, file.endLine);
+        await this.#colour(token, provenance, changed, shown);
+        return {
+          path: file.path,
+          status: changed.status,
+          url,
+          hunks: shown,
+          otherHunks: all.length - shown.length,
+          noPatch: changed.patch === undefined,
+        };
+      }),
+    );
+    return { state: "ok", viewer, files };
   }
 
-  /** One of the element's files in full, with its changes woven in. */
-  async whole(
+  async #whole(
     token: string,
-    viewer: string | undefined,
     provenance: Provenance,
     element: ClickableElement,
     path: string,
   ): Promise<DiffAnswer | undefined> {
-    const file = element.files.find((candidate) => candidate.path === path);
-    if (file === undefined) return undefined;
+    if (!element.files.some((candidate) => candidate.path === path)) return undefined;
 
-    const comparison = await this.#compare(token, provenance);
+    // The new version is what is shown unless the change deleted the file, so it
+    // is fetched alongside the comparison rather than after it.
+    const [comparison, head] = await Promise.all([
+      this.#compare(token, provenance),
+      this.#file(token, provenance, provenance.head.sha, path).catch(() => undefined),
+    ]);
     const changed = comparison.files.find((candidate) => candidate.filename === path);
     const deleted = changed?.status === "removed";
-    const sha = deleted ? provenance.base.sha : provenance.head.sha;
-    const { repo } = provenance;
-    const shown = await this.#file(token, provenance, sha, path);
-    const hunks = changed?.patch === undefined ? [] : parsePatch(changed.patch);
-    const lines = shown.text === undefined ? undefined : wholeFile(shown.text, hunks, deleted);
+    const shown = deleted || head === undefined
+      ? await this.#file(token, provenance, deleted ? provenance.base.sha : provenance.head.sha, path)
+      : head;
+    if (shown.text === undefined) return { state: "ok-full", lines: undefined };
 
-    if (lines !== undefined) {
+    const hunks = changed?.patch === undefined ? [] : parsePatch(changed.patch);
+    const lines = wholeFile(shown.text, hunks, deleted);
+    if (deleted) attach(lines, undefined, shown.tokens);
+    else {
       // Removed lines of a file still there take their colours from its old version.
       const older =
-        !deleted && changed !== undefined && changed.status !== "added" && lines.some((line) => line.t === "-")
-          ? await this.#file(token, provenance, provenance.base.sha, changed.previousFilename ?? path).catch(() => undefined)
+        changed !== undefined && changed.status !== "added" && lines.some((line) => line.t === "-")
+          ? await this.#file(token, provenance, provenance.base.sha, changed.previousFilename ?? path).catch(
+              () => undefined,
+            )
           : undefined;
-      for (const line of lines) {
-        const tokens =
-          line.t === "-"
-            ? line.o === undefined ? undefined : (deleted ? shown.tokens : older?.tokens)?.[line.o - 1]
-            : line.n === undefined ? undefined : shown.tokens?.[line.n - 1];
-        if (tokens !== undefined) line.h = tokens;
-      }
+      attach(lines, shown.tokens, older?.tokens);
     }
-
-    return {
-      state: "ok-full",
-      viewer,
-      path,
-      url: `${this.#github.webUrl}/${repo.owner}/${repo.name}/blob/${sha}/${path}`,
-      lines,
-    };
+    return { state: "ok-full", lines };
   }
 }

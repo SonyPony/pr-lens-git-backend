@@ -30,6 +30,13 @@ export const tokenMatches = (token: string, hash: string): boolean => {
   return timingSafeEqual(candidate, stored);
 };
 
+/** Two secrets compared in constant time, for values held as they are rather than hashed. */
+export const sameSecret = (a: string, b: string): boolean => {
+  const left = Buffer.from(a, "utf8");
+  const right = Buffer.from(b, "utf8");
+  return left.length === right.length && timingSafeEqual(left, right);
+};
+
 /** The bearer token, or undefined when the header is absent or malformed. */
 export const bearerToken = (header: string | undefined): string | undefined => {
   if (header === undefined) return undefined;

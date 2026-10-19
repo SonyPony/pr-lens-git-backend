@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 
-import { loadConfig } from "../src/config.ts";
-import { call, start, type Harness } from "./harness.ts";
+import { call, loadConfigWith, start, type Harness } from "./harness.ts";
 
 /**
  * PUSH_TOKENS: with it set, only a bearer among the tokens mints a canvas,
@@ -73,15 +72,7 @@ describe("minting without push tokens", () => {
 });
 
 describe("the PUSH_TOKENS setting", () => {
-  const load = (value: string) => {
-    const saved = { ...process.env };
-    Object.assign(process.env, { STORE: "memory", PUSH_TOKENS: value });
-    try {
-      return loadConfig();
-    } finally {
-      process.env = saved;
-    }
-  };
+  const load = (value: string) => loadConfigWith({ PUSH_TOKENS: value });
 
   it("holds hashes only", () => {
     const config = load(CI_TOKEN);

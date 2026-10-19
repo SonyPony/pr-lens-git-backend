@@ -1,4 +1,5 @@
 import type { Canvas } from "./canvas.ts";
+import { clickableElements, hotspotsOf } from "./elements.ts";
 import { imagePath } from "./urls.ts";
 import { VERSION } from "./version.ts";
 
@@ -1604,7 +1605,9 @@ function applyLbTransform() {
   }
 }
 
-function wirePanZoom(stageEl, getTransform, applyFn) {
+// onTap(target) fires for a press and release that barely moved and never became
+// a pinch: the one place that tells a click on a diagram from a pan.
+function wirePanZoom(stageEl, getTransform, applyFn, onTap) {
   if (!stageEl) return null;
   var current = getTransform();
   var target = { x: current.x, y: current.y, scale: current.scale };
@@ -1693,6 +1696,7 @@ function wirePanZoom(stageEl, getTransform, applyFn) {
   var isDragging = false;
   var dragStart = { x: 0, y: 0 };
   var startPos = { x: 0, y: 0 };
+  var tapTarget = null;
 
   stageEl.addEventListener("pointerdown", function(e) {
     if (cvContainer) cvContainer.classList.remove("animate-transform");
@@ -1706,9 +1710,11 @@ function wirePanZoom(stageEl, getTransform, applyFn) {
       isDragging = true;
       dragStart = { x: e.clientX, y: e.clientY };
       startPos = { x: current.x, y: current.y };
+      tapTarget = e.target;
       stageEl.setPointerCapture(e.pointerId);
       stageEl.classList.add("is-dragging");
     } else if (activePointers.size === 2) {
+      tapTarget = null;
       isDragging = false;
       stageEl.classList.remove("is-dragging");
       var pts = Array.from(activePointers.values());
@@ -1747,6 +1753,7 @@ function wirePanZoom(stageEl, getTransform, applyFn) {
 
   function removePointer(e) {
     activePointers.delete(e.pointerId);
+    if (activePointers.size === 0) tapTarget = null;
     if (activePointers.size < 2) initialDist = 0;
     if (activePointers.size === 0) {
       isDragging = false;
@@ -1754,7 +1761,11 @@ function wirePanZoom(stageEl, getTransform, applyFn) {
       try { stageEl.releasePointerCapture(e.pointerId); } catch(err) {}
     }
   }
-  stageEl.addEventListener("pointerup", removePointer);
+  stageEl.addEventListener("pointerup", function(e) {
+    var target = tapTarget;
+    if (activePointers.size === 1 && target && onTap && Math.hypot(e.clientX - dragStart.x, e.clientY - dragStart.y) < 5) onTap(target);
+    removePointer(e);
+  });
   stageEl.addEventListener("pointercancel", removePointer);
 
   stageEl.addEventListener("wheel", function(e) {
@@ -1827,7 +1838,7 @@ function wirePanZoom(stageEl, getTransform, applyFn) {
   };
 }
 
-var lbCtrl = wirePanZoom(lbStage, function() { return lbTransform; }, applyLbTransform);
+var lbCtrl = wirePanZoom(lbStage, function() { return lbTransform; }, applyLbTransform, tapElement);
 
 function fitLbDiagram(multiplier, instant) {
   var tile = tiles[lbIndex];
@@ -1869,7 +1880,13 @@ var panelDelta = document.getElementById("el-panel-delta");
 var panelSummary = document.getElementById("el-panel-summary");
 var panelFiles = document.getElementById("el-panel-files");
 var panelClose = document.getElementById("el-panel-close");
+var panelNote = document.getElementById("el-panel-note");
+var panelViewer = document.getElementById("el-panel-viewer");
+var canvasId = parsed.canvasId;
 var selectedKey = null;
+var selectedButtons = [];
+var fileBodies = [];
+var diffRequest = 0;
 
 // Wraps the host's picture in a frame and lays one button per element over it,
 // placed in percentages so the targets follow every pan and zoom for free.
@@ -1890,7 +1907,11 @@ function attachHotspots(host, index) {
     if (!el) continue;
     var button = document.createElement("button");
     button.type = "button";
-    button.className = "hs hs-" + el.element + (spot.key === selectedKey ? " is-selected" : "");
+    button.className = "hs hs-" + el.element;
+    if (spot.key === selectedKey) {
+      button.classList.add("is-selected");
+      selectedButtons.push(button);
+    }
     button.dataset.el = spot.key;
     button.title = el.label;
     button.setAttribute("aria-label", "Show changes for " + el.label);
@@ -1904,9 +1925,14 @@ function attachHotspots(host, index) {
 }
 
 function markSelected() {
+  for (var i = 0; i < selectedButtons.length; i++) selectedButtons[i].classList.remove("is-selected");
+  selectedButtons = [];
+  if (!selectedKey) return;
   var all = document.querySelectorAll(".hs");
-  for (var i = 0; i < all.length; i++) {
-    all[i].classList.toggle("is-selected", all[i].dataset.el === selectedKey);
+  for (var j = 0; j < all.length; j++) {
+    if (all[j].dataset.el !== selectedKey) continue;
+    all[j].classList.add("is-selected");
+    selectedButtons.push(all[j]);
   }
 }
 
@@ -1941,7 +1967,7 @@ function openPanel(key) {
       head.appendChild(document.createTextNode(" "));
       var lines = document.createElement("span");
       lines.className = "lines";
-      lines.textContent = "L" + file.startLine + (file.endLine && file.endLine !== file.startLine ? "–" + file.endLine : "");
+      lines.textContent = rangeOf(file);
       head.appendChild(lines);
     }
     item.appendChild(head);
@@ -1960,11 +1986,9 @@ function openPanel(key) {
   if (el.files.length) loadDiff(key);
 }
 
-var canvasId = parsed.canvasId;
-var panelNote = document.getElementById("el-panel-note");
-var panelViewer = document.getElementById("el-panel-viewer");
-var fileBodies = [];
-var diffRequest = 0;
+function rangeOf(file) {
+  return file.startLine ? "L" + file.startLine + (file.endLine && file.endLine !== file.startLine ? "–" + file.endLine : "") : "";
+}
 
 function setNote(text, link) {
   panelNote.textContent = text;
@@ -2032,7 +2056,7 @@ function showDiff(key, answer) {
   setNote("");
   showViewer(answer.viewer);
   for (var i = 0; i < answer.files.length && i < fileBodies.length; i++) {
-    showFile(key, answer.files[i], fileBodies[i]);
+    showFile(key, answer.files[i], elements[key].files[i], fileBodies[i]);
   }
 }
 
@@ -2043,7 +2067,7 @@ function message(body, text) {
   body.appendChild(p);
 }
 
-function showFile(key, file, body) {
+function showFile(key, file, ref, body) {
   body.textContent = "";
   var bar = document.createElement("div");
   bar.className = "file-bar";
@@ -2070,13 +2094,14 @@ function showFile(key, file, body) {
   var view = document.createElement("div");
   body.appendChild(view);
   var whole = false;
+  var wholeAnswer = null;
 
   function changedLines() {
     view.textContent = "";
     if (file.status === "unchanged") return message(view, "This file did not change in this pull request.");
     if (file.noPatch) return message(view, "GitHub shows no diff for this file: it is binary or too large.");
     if (!file.hunks.length && file.otherHunks) {
-      return message(view, "No changes in " + (file.range || "these lines") + "; " + file.otherHunks + " elsewhere in the file.");
+      return message(view, "No changes in " + (rangeOf(ref) || "these lines") + "; " + file.otherHunks + " elsewhere in the file.");
     }
     if (file.otherHunks) message(view, file.otherHunks + " more change" + (file.otherHunks === 1 ? "" : "s") + " elsewhere in the file.");
     view.appendChild(renderHunks(file.hunks));
@@ -2088,13 +2113,14 @@ function showFile(key, file, body) {
     if (!whole) return changedLines();
     view.textContent = "";
     message(view, "Loading the whole file…");
-    getDiff(key, file.path).then(function(answer) {
+    (wholeAnswer || (wholeAnswer = getDiff(key, file.path))).then(function(answer) {
       if (!whole) return;
       view.textContent = "";
       if (answer.state !== "ok-full") return message(view, answer.reason || "The file is not available.");
       if (!answer.lines) return message(view, "The file is larger than this panel will show.");
       view.appendChild(renderWhole(answer.lines));
     }, function() {
+      wholeAnswer = null;
       if (whole) {
         view.textContent = "";
         message(view, "The file could not be loaded.");
@@ -2180,21 +2206,12 @@ function closePanel() {
 
 if (panelClose) panelClose.addEventListener("click", closePanel);
 
-// The pan and zoom handlers capture the pointer on the stage, so a hotspot never
-// sees its own click. A press and release on a hotspot with almost no movement
-// between them is a tap; anything longer was a drag and stays a pan.
-var tap = null;
-document.addEventListener("pointerdown", function(e) {
-  var spot = e.target.closest ? e.target.closest(".hs") : null;
-  tap = spot && e.button === 0 ? { key: spot.dataset.el, x: e.clientX, y: e.clientY, id: e.pointerId } : null;
-}, true);
-document.addEventListener("pointerup", function(e) {
-  if (!tap || tap.id !== e.pointerId) return;
-  var key = tap.key;
-  var moved = Math.hypot(e.clientX - tap.x, e.clientY - tap.y);
-  tap = null;
-  if (moved < 5) openPanel(key);
-}, true);
+// The stage captures the pointer for panning, so a hotspot never sees its own
+// click: the pan and zoom handler reports taps here instead.
+function tapElement(target) {
+  var spot = target && target.closest ? target.closest(".hs") : null;
+  if (spot) openPanel(spot.dataset.el);
+}
 // Enter or Space on a focused hotspot: a click with no pointer behind it.
 document.addEventListener("click", function(e) {
   if (e.detail !== 0) return;
@@ -2307,7 +2324,7 @@ function applyCvTransform() {
   }
 }
 
-var cvCtrl = wirePanZoom(cvStage, function() { return cvTransform; }, applyCvTransform);
+var cvCtrl = wirePanZoom(cvStage, function() { return cvTransform; }, applyCvTransform, tapElement);
 // The first diagram arrives drawn by the server, so it gets its targets here.
 attachHotspots(cvBody, cvIndex);
 if (currentMode === "canvas") {
@@ -2473,99 +2490,6 @@ const provenanceBadge = (
 
 export type CanvasPageOptions = {
   demoSample?: string;
-};
-
-type GraphDocument = NonNullable<Canvas["document"]>;
-type FileRef = GraphDocument["nodes"][number]["files"][number];
-
-/** What the side panel shows for one element; built from the stored document. */
-export type ClickableElement = {
-  element: "node" | "edge";
-  id: string;
-  label: string;
-  /** The node's or the edge's own kind, e.g. `module` or `http`. */
-  type: string;
-  delta: string;
-  summary: string | undefined;
-  files: FileRef[];
-  /** Edges only: the labels of the two ends. */
-  from?: string;
-  to?: string;
-};
-
-/**
- * Everything a click on a diagram can open, keyed `node:{id}` and `edge:{id}`,
- * since a node and an edge may share an id. Every node is clickable. An edge
- * only when it names the code it stands for: its atlas box bounds the whole
- * curve, so an edge with nothing to show would only steal clicks from the
- * space around it.
- */
-export const clickableElements = (
-  document: Canvas["document"],
-): Record<string, ClickableElement> => {
-  const elements: Record<string, ClickableElement> = {};
-  if (document === undefined) return elements;
-
-  const labels = new Map(document.nodes.map((node) => [node.id, node.label]));
-  for (const node of document.nodes) {
-    elements[`node:${node.id}`] = {
-      element: "node",
-      id: node.id,
-      label: node.label,
-      type: node.kind,
-      delta: node.delta,
-      summary: node.summary,
-      files: node.files,
-    };
-  }
-  for (const edge of document.edges) {
-    if (edge.files.length === 0) continue;
-    elements[`edge:${edge.id}`] = {
-      element: "edge",
-      id: edge.id,
-      label: edge.label ?? `${labels.get(edge.from) ?? edge.from} → ${labels.get(edge.to) ?? edge.to}`,
-      type: edge.kind,
-      delta: edge.delta,
-      summary: edge.summary,
-      files: edge.files,
-      from: labels.get(edge.from) ?? edge.from,
-      to: labels.get(edge.to) ?? edge.to,
-    };
-  }
-  return elements;
-};
-
-/** A click target on one tile, as fractions of the tile so it scales with any zoom. */
-export type Hotspot = { key: string; x: number; y: number; w: number; h: number };
-
-const fraction = (value: number, of: number): number =>
-  Math.round((value / of) * 100000) / 100000;
-
-/**
- * The click targets of one tile, edges first so a node drawn over an edge's
- * bounding box stays on top of it and wins the click.
- */
-export const hotspotsOf = (
-  tile: Canvas["drawing"]["tiles"][number],
-  elements: Record<string, ClickableElement>,
-): Hotspot[] => {
-  const spots: Hotspot[] = [];
-  const add = (prefix: "node" | "edge", boxes: Record<string, { x: number; y: number; width: number; height: number }>) => {
-    for (const [id, box] of Object.entries(boxes)) {
-      const key = `${prefix}:${id}`;
-      if (!(key in elements)) continue;
-      spots.push({
-        key,
-        x: fraction(box.x, tile.width),
-        y: fraction(box.y, tile.height),
-        w: fraction(box.width, tile.width),
-        h: fraction(box.height, tile.height),
-      });
-    }
-  };
-  add("edge", tile.atlas.edges);
-  add("node", tile.atlas.nodes);
-  return spots;
 };
 
 /** No origin: every address on this page is a path, and resolves against the reader's own. */

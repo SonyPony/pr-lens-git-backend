@@ -68,3 +68,31 @@ export const call = async <T = any>(
   }
   return { status: response.status, body: body as T, headers: response.headers };
 };
+
+/** The config a server would load with these settings, over the in-memory store. */
+export const loadConfigWith = (env: Record<string, string>) => {
+  const saved = { ...process.env };
+  Object.assign(process.env, { STORE: "memory", ...env });
+  try {
+    return loadConfig();
+  } finally {
+    process.env = saved;
+  }
+};
+
+/** Mints a canvas and pushes `document` as its first revision; the canvas id. */
+export const pushDocument = async (harness: Harness, document: unknown): Promise<string> => {
+  const minted = await call(`${harness.url}/api/canvas`, { method: "POST" });
+  const { id, writeToken } = minted.body;
+  const pushed = await call(`${harness.url}/api/canvas/${id}`, {
+    method: "PUT",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${writeToken}`,
+      "if-match": "0",
+    },
+    body: JSON.stringify(document),
+  });
+  if (pushed.status !== 200) throw new Error(`push failed: ${JSON.stringify(pushed.body)}`);
+  return id;
+};

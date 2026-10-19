@@ -1,12 +1,13 @@
 import { randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
-import { forgetSession, handleAuth, loginUrl, readerOf } from "./auth.ts";
+import { callback, forgetSession, login, loginUrl, logout, readerOf } from "./auth.ts";
 import { CanvasService } from "./canvas.ts";
 import type { Config } from "./config.ts";
 import { getDemoFixture, getDemoImage } from "./demo.ts";
-import { DiffService, type DiffAnswer, type Provenance } from "./diff.ts";
-import { GitHubClient, GitHubError } from "./github.ts";
+import { DiffService, type DiffAnswer } from "./diff.ts";
+import { elementOf } from "./elements.ts";
+import { GitHubClient } from "./github.ts";
 import { ApiError, invalidRequest, notFound, rateLimited } from "./errors.ts";
 import {
   clientOf,
@@ -17,14 +18,7 @@ import {
   sendText,
 } from "./http.ts";
 import { customIndex, type CustomIndex } from "./markdown.ts";
-import {
-  canvasPage,
-  clickableElements,
-  heroSvg,
-  indexPage,
-  markdownPage,
-  pageCsp,
-} from "./page.ts";
+import { canvasPage, heroSvg, indexPage, markdownPage, pageCsp } from "./page.ts";
 import { DrawingCache } from "./render/cache.ts";
 import { bearerToken } from "./secrets.ts";
 import { CachedStore } from "./store/cached.ts";
@@ -99,12 +93,23 @@ const route = async (
   const query = new URL(req.url ?? "/", "http://localhost").searchParams;
   const origin = originOf(req, config);
 
-  if (await handleAuth(req, res, path, query, origin, config, github)) return;
+  // Sign-in exists only on a server given a GitHub App; elsewhere these are no route at all.
+  if (path === "/auth/github/login" || path === "/auth/github/callback" || path === "/auth/logout") {
+    const app = config.github.app;
+    if (app === undefined) throw notFound();
+    if (path === "/auth/logout") {
+      if (method !== "POST") return notAllowed(res, "POST");
+      return logout(res, origin);
+    }
+    if (method !== "GET") return notAllowed(res, "GET");
+    if (path === "/auth/github/login") return login(res, query, origin, app, github);
+    return callback(req, res, query, origin, app, github);
+  }
 
   const diff = DIFF.exec(path);
   if (diff?.[1] !== undefined) {
     if (method !== "GET") return notAllowed(res, "GET");
-    const { answer, forget } = await elementDiff(req, diff[1], query, origin, config, service, diffs);
+    const { answer, forget } = await elementDiff(req, diff[1], query, config, service, diffs);
     sendJson(res, DIFF_STATUS[answer.state], answer, {
       // Code, read with this reader's token: no cache anywhere may keep it,
       // and none may hand one reader's answer to another.
@@ -343,26 +348,16 @@ const elementDiff = async (
   req: IncomingMessage,
   id: string,
   query: URLSearchParams,
-  origin: string,
   config: Config,
   service: CanvasService,
   diffs: DiffService,
 ): Promise<{ answer: DiffAnswer; forget: boolean }> => {
-  const held = await service.canvas(id);
-  const document = held.document;
+  const { document } = await service.canvas(id);
   if (document === undefined)
     return { answer: { state: "unavailable", reason: "This server cannot read the canvas's document." }, forget: false };
 
-  const element = clickableElements(document)[query.get("el") ?? ""];
+  const element = elementOf(document, query.get("el") ?? "");
   if (element === undefined) throw notFound();
-
-  const provenance = document.provenance as Provenance | undefined;
-  const githubHost = new URL(config.github.webUrl).host;
-  if (provenance === undefined || provenance.repo.host !== githubHost)
-    return {
-      answer: { state: "unavailable", reason: `Only changes on ${githubHost} can be shown.` },
-      forget: false,
-    };
 
   const reader = readerOf(req, config);
   if (reader === undefined) {
@@ -376,26 +371,13 @@ const elementDiff = async (
     };
   }
 
-  const { owner, name } = provenance.repo;
-  try {
-    if (!(await diffs.canRead(reader.token, owner, name)))
-      return { answer: { state: "no-access", repo: `${owner}/${name}`, viewer: reader.viewer }, forget: false };
-
-    const full = query.get("full");
-    if (full === null) return { answer: await diffs.element(reader.token, reader.viewer, provenance, element), forget: false };
-    const whole = await diffs.whole(reader.token, reader.viewer, provenance, element, full);
-    if (whole === undefined) throw notFound();
-    return { answer: whole, forget: false };
-  } catch (error) {
-    if (!(error instanceof GitHubError)) throw error;
-    // A session GitHub stopped honouring is over: say so, and end it.
-    if (error.status === 401 && reader.fromSession)
-      return { answer: { state: "signin", loginUrl: loginUrl(config, id) }, forget: true };
-    return {
-      answer: { state: "unavailable", reason: `GitHub could not show these changes (${error.status}).` },
-      forget: false,
-    };
-  }
+  const result = await diffs.answer(reader, document.provenance, element, query.get("full"));
+  if (result === undefined) throw notFound();
+  if (result.state !== "rejected") return { answer: result, forget: false };
+  // GitHub turned the token away: a session is over, so end it and offer sign-in again.
+  return reader.fromSession
+    ? { answer: { state: "signin", loginUrl: loginUrl(config, id) }, forget: true }
+    : { answer: { state: "unavailable", reason: "GitHub did not accept this server's token." }, forget: false };
 };
 
 /**

@@ -5,8 +5,8 @@ import { renderAll } from "@coldtea/pr-lens-renderer";
 import { parseGraphDoc, type GraphDoc } from "@coldtea/pr-lens-schema";
 import { payloadGraph } from "@coldtea/pr-lens-schema/examples";
 
-import { call, start, type Harness } from "./harness.ts";
-import { clickableElements, hotspotsOf } from "../src/page.ts";
+import { call, pushDocument, start, type Harness } from "./harness.ts";
+import { clickableElements, hotspotsOf } from "../src/elements.ts";
 import { draw } from "../src/render/draw.ts";
 
 /**
@@ -134,21 +134,7 @@ describe("the canvas page", () => {
   });
   after(async () => harness.close());
 
-  const push = async (document: unknown): Promise<string> => {
-    const minted = await call(`${harness.url}/api/canvas`, { method: "POST" });
-    const { id, writeToken } = minted.body;
-    const pushed = await call(`${harness.url}/api/canvas/${id}`, {
-      method: "PUT",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${writeToken}`,
-        "if-match": "0",
-      },
-      body: JSON.stringify(document),
-    });
-    assert.equal(pushed.status, 200);
-    return id;
-  };
+  const push = (document: unknown) => pushDocument(harness, document);
 
   const pageData = (html: string) => {
     const json = /<script id="pr-lens-data" type="application\/json">([\s\S]*?)<\/script>/.exec(html)?.[1];
