@@ -1,9 +1,12 @@
 import { randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
+import { forgetSession, handleAuth, loginUrl, readerOf } from "./auth.ts";
 import { CanvasService } from "./canvas.ts";
 import type { Config } from "./config.ts";
 import { getDemoFixture, getDemoImage } from "./demo.ts";
+import { DiffService, type DiffAnswer, type Provenance } from "./diff.ts";
+import { GitHubClient, GitHubError } from "./github.ts";
 import { ApiError, invalidRequest, notFound, rateLimited } from "./errors.ts";
 import {
   clientOf,
@@ -14,7 +17,14 @@ import {
   sendText,
 } from "./http.ts";
 import { customIndex, type CustomIndex } from "./markdown.ts";
-import { canvasPage, heroSvg, indexPage, markdownPage, pageCsp } from "./page.ts";
+import {
+  canvasPage,
+  clickableElements,
+  heroSvg,
+  indexPage,
+  markdownPage,
+  pageCsp,
+} from "./page.ts";
 import { DrawingCache } from "./render/cache.ts";
 import { bearerToken } from "./secrets.ts";
 import { CachedStore } from "./store/cached.ts";
@@ -33,6 +43,7 @@ import { StoreThrottled } from "./store/types.ts";
 const CANVAS = /^\/api\/canvas\/([^/]+)$/;
 const ROTATE = /^\/api\/canvas\/([^/]+)\/rotate$/;
 const PAGE = /^\/c\/([^/]+?)(\.svg)?$/;
+const DIFF = /^\/c\/([^/]+)\/diff$/;
 const IMAGE = /^\/images\/([^/]+)\/([^/]+\.svg)$/;
 
 export type App = {
@@ -53,6 +64,8 @@ export const createApp = (config: Config): App => {
   const store = new CachedStore(backing, config.readCacheTtlMs);
   const drawings = new DrawingCache(config.renderCacheBytes, config.draw);
   const service = new CanvasService(config, store, drawings);
+  const github = new GitHubClient(config.github);
+  const diffs = new DiffService(github);
 
   const index =
     config.indexMarkdownFile === undefined
@@ -61,7 +74,7 @@ export const createApp = (config: Config): App => {
 
   const server = createServer((req, res) => {
     const started = Date.now();
-    void route(req, res, config, service, index)
+    void route(req, res, config, service, index, github, diffs)
       .catch((error: unknown) => refuse(res, error))
       .finally(() => {
         if (config.logRequests) log(req, res, started);
@@ -77,12 +90,30 @@ const route = async (
   config: Config,
   service: CanvasService,
   index: CustomIndex | undefined,
+  github: GitHubClient,
+  diffs: DiffService,
 ): Promise<void> => {
   const method = req.method ?? "GET";
   // Only the path matters; a query string is never part of a route here.
   const path = (req.url ?? "/").split("?")[0] ?? "/";
   const query = new URL(req.url ?? "/", "http://localhost").searchParams;
   const origin = originOf(req, config);
+
+  if (await handleAuth(req, res, path, query, origin, config, github)) return;
+
+  const diff = DIFF.exec(path);
+  if (diff?.[1] !== undefined) {
+    if (method !== "GET") return notAllowed(res, "GET");
+    const { answer, forget } = await elementDiff(req, diff[1], query, origin, config, service, diffs);
+    sendJson(res, DIFF_STATUS[answer.state], answer, {
+      // Code, read with this reader's token: no cache anywhere may keep it,
+      // and none may hand one reader's answer to another.
+      "cache-control": "private, no-store",
+      vary: "Cookie",
+      ...(forget ? { "set-cookie": forgetSession(origin) } : {}),
+    });
+    return;
+  }
 
   // Somebody pasted the host into a browser. Tell them what this is, and mostly
   // how to point a working setup at it rather than at prlens.dev -- unless the
@@ -170,7 +201,11 @@ const route = async (
 
   if (path === "/api/canvas") {
     if (method !== "POST") return notAllowed(res, "POST");
-    const minted = await service.mint(clientOf(req, config), origin);
+    const minted = await service.mint(
+      clientOf(req, config),
+      origin,
+      bearerToken(headerOf(req, "authorization")),
+    );
     sendJson(res, 201, minted);
     return;
   }
@@ -289,6 +324,80 @@ const route = async (
   throw notFound();
 };
 
+const DIFF_STATUS: Record<DiffAnswer["state"], number> = {
+  ok: 200,
+  "ok-full": 200,
+  signin: 401,
+  "no-access": 403,
+  unavailable: 422,
+};
+
+/**
+ * `GET /c/{id}/diff?el=node:{id}[&full={path}]`: the code behind one element.
+ *
+ * The request names an element and nothing more. Which repository, which
+ * commits and which files all come from the stored document, and the whole
+ * file can only be one of the element's own.
+ */
+const elementDiff = async (
+  req: IncomingMessage,
+  id: string,
+  query: URLSearchParams,
+  origin: string,
+  config: Config,
+  service: CanvasService,
+  diffs: DiffService,
+): Promise<{ answer: DiffAnswer; forget: boolean }> => {
+  const held = await service.canvas(id);
+  const document = held.document;
+  if (document === undefined)
+    return { answer: { state: "unavailable", reason: "This server cannot read the canvas's document." }, forget: false };
+
+  const element = clickableElements(document)[query.get("el") ?? ""];
+  if (element === undefined) throw notFound();
+
+  const provenance = document.provenance as Provenance | undefined;
+  const githubHost = new URL(config.github.webUrl).host;
+  if (provenance === undefined || provenance.repo.host !== githubHost)
+    return {
+      answer: { state: "unavailable", reason: `Only changes on ${githubHost} can be shown.` },
+      forget: false,
+    };
+
+  const reader = readerOf(req, config);
+  if (reader === undefined) {
+    const link = loginUrl(config, id);
+    return {
+      answer:
+        link === undefined
+          ? { state: "unavailable", reason: "Sign-in with GitHub is not set up on this server." }
+          : { state: "signin", loginUrl: link },
+      forget: false,
+    };
+  }
+
+  const { owner, name } = provenance.repo;
+  try {
+    if (!(await diffs.canRead(reader.token, owner, name)))
+      return { answer: { state: "no-access", repo: `${owner}/${name}`, viewer: reader.viewer }, forget: false };
+
+    const full = query.get("full");
+    if (full === null) return { answer: await diffs.element(reader.token, reader.viewer, provenance, element), forget: false };
+    const whole = await diffs.whole(reader.token, reader.viewer, provenance, element, full);
+    if (whole === undefined) throw notFound();
+    return { answer: whole, forget: false };
+  } catch (error) {
+    if (!(error instanceof GitHubError)) throw error;
+    // A session GitHub stopped honouring is over: say so, and end it.
+    if (error.status === 401 && reader.fromSession)
+      return { answer: { state: "signin", loginUrl: loginUrl(config, id) }, forget: true };
+    return {
+      answer: { state: "unavailable", reason: `GitHub could not show these changes (${error.status}).` },
+      forget: false,
+    };
+  }
+};
+
 /**
  * `If-Match` carries the revision the writer last saw, as a plain integer,
  * quotes tolerated. Absent or unparseable is the contract's first refusal.
@@ -353,6 +462,7 @@ const redact = (path: string): string =>
   path
     .replace(CANVAS, "/api/canvas/:id")
     .replace(ROTATE, "/api/canvas/:id/rotate")
+    .replace(DIFF, "/c/:id/diff")
     .replace(PAGE, "/c/:id$2")
     .replace(IMAGE, "/images/:id/:file");
 

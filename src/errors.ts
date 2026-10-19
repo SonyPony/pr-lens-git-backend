@@ -25,6 +25,7 @@ const STATUS = {
   DELETION_INCOMPLETE: 409,
   RATE_LIMITED: 429,
   TOO_LARGE: 413,
+  UNAUTHENTICATED: 401,
 } as const;
 
 export type ErrorCode = keyof typeof STATUS;
@@ -90,6 +91,17 @@ export const rateLimited = (retryAt: Date, message: string): ApiError =>
     kind: "retryAt",
     retryAt: retryAt.toISOString(),
   });
+
+/**
+ * A mint without one of the push tokens this server was given. The contract's
+ * own code for a bearer it does not accept, so the CLI says "did not accept
+ * this sign-in" rather than calling the server unavailable.
+ */
+export const unauthenticated = (): ApiError =>
+  new ApiError(
+    "UNAUTHENTICATED",
+    "This server only mints canvases for a push token it was given; set PR_LENS_TOKEN",
+  );
 
 export const tooLarge = (limit: number): ApiError =>
   new ApiError(

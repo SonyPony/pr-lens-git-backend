@@ -1,6 +1,7 @@
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { hashToken } from "./secrets.ts";
 import { VERSION } from "./version.ts";
 
 /**
@@ -70,6 +71,76 @@ export type Config = {
    * is the page this server ships with.
    */
   indexMarkdownFile: string | undefined;
+  /**
+   * Hashes of the bearer tokens allowed to mint a canvas, from PUSH_TOKENS.
+   * Empty leaves minting open to anyone, as the contract's hosted app does.
+   * Only hashes are held, so a dump of the config is not a list of tokens.
+   */
+  pushTokenHashes: string[];
+  github: GitHubConfig;
+};
+
+export type GitHubConfig = {
+  apiUrl: string;
+  webUrl: string;
+  timeoutMs: number;
+  /**
+   * The GitHub App readers sign in with. Undefined turns sign-in off: the panel
+   * still shows what a click selected, but no code.
+   */
+  app: { clientId: string; clientSecret: string; sessionKey: Buffer } | undefined;
+  /**
+   * A token to read diffs with when nobody is signed in, from GITHUB_DEV_TOKEN.
+   * Only on a server bound to loopback: anywhere else it would show anybody
+   * with a canvas link whatever the token can read.
+   */
+  devToken: string | undefined;
+};
+
+const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
+
+const githubConfig = (host: string): GitHubConfig => {
+  const clientId = optional("GITHUB_APP_CLIENT_ID");
+  let app: GitHubConfig["app"];
+  if (clientId !== undefined) {
+    const sessionKey = Buffer.from(str("SESSION_KEY"), "base64");
+    if (sessionKey.length !== 32)
+      throw new Error("SESSION_KEY must be 32 random bytes, base64: openssl rand -base64 32");
+    app = { clientId, clientSecret: str("GITHUB_APP_CLIENT_SECRET"), sessionKey };
+  }
+
+  const devToken = optional("GITHUB_DEV_TOKEN");
+  if (devToken !== undefined && !LOOPBACK.has(host))
+    throw new Error(
+      `GITHUB_DEV_TOKEN only works on a server bound to loopback, and HOST is ${host}. Readers sign in with GITHUB_APP_CLIENT_ID instead.`,
+    );
+
+  return {
+    apiUrl: origin(str("GITHUB_API_URL", "https://api.github.com")),
+    webUrl: origin(str("GITHUB_WEB_URL", "https://github.com")),
+    timeoutMs: int("GITHUB_TIMEOUT_MS", 10_000),
+    app,
+    devToken,
+  };
+};
+
+/** Long enough that a push token cannot be guessed; `prl_u_` plus 22 is 28. */
+const MIN_PUSH_TOKEN_LENGTH = 20;
+
+const pushTokenHashes = (): string[] => {
+  const raw = optional("PUSH_TOKENS");
+  if (raw === undefined) return [];
+  return raw
+    .split(",")
+    .map((token) => token.trim())
+    .filter((token) => token !== "")
+    .map((token) => {
+      if (token.length < MIN_PUSH_TOKEN_LENGTH)
+        throw new Error(
+          `PUSH_TOKENS entries must be at least ${MIN_PUSH_TOKEN_LENGTH} characters`,
+        );
+      return hashToken(token);
+    });
 };
 
 const str = (name: string, fallback?: string): string => {
@@ -140,9 +211,10 @@ export const loadConfig = (): Config => {
     throw new Error(`STORE must be "git" or "memory", got ${store}`);
 
   const publicUrl = process.env.PUBLIC_URL?.trim();
+  const host = str("HOST", "0.0.0.0");
 
   return {
-    host: str("HOST", "0.0.0.0"),
+    host,
     port: int("PORT", 8787),
     publicUrl:
       publicUrl === undefined || publicUrl === ""
@@ -187,5 +259,7 @@ export const loadConfig = (): Config => {
     logRequests: bool("LOG_REQUESTS", true),
     indexPage: bool("INDEX_PAGE", true),
     indexMarkdownFile: optional("INDEX_MARKDOWN_FILE"),
+    pushTokenHashes: pushTokenHashes(),
+    github: githubConfig(host),
   };
 };

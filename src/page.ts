@@ -1079,7 +1079,7 @@ kbd {
   position: fixed;
   top: 1rem; right: 1rem; bottom: 1rem;
   z-index: 1000;
-  width: min(440px, calc(100vw - 2rem));
+  width: min(680px, calc(100vw - 2rem));
   overflow: auto;
   padding: 1rem 1.1rem;
   background: var(--card);
@@ -1111,8 +1111,34 @@ kbd {
 .el-panel-label { margin: 1.1rem 0 .4rem; font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
 .el-panel-files { list-style: none; margin: 0; padding: 0; font-size: .85rem; }
 .el-panel-files li { padding: .35rem 0; border-top: 1px solid var(--edge); overflow-wrap: anywhere; }
-.el-panel-files .lines { color: var(--dim); margin-left: .4rem; }
-.el-panel-files .none { color: var(--dim); }
+.el-panel-files .lines { color: var(--dim); }
+.el-panel-note { margin: 0 0 .4rem; color: var(--dim); font-size: .85rem; }
+.el-panel-note:empty { display: none; }
+.el-panel-viewer { margin: .9rem 0 0; color: var(--dim); font-size: .78rem; }
+.el-panel-viewer:empty { display: none; }
+.link-button {
+  margin: 0; padding: 0; border: 0; background: none;
+  color: var(--accent); font: inherit; cursor: pointer; text-decoration: underline;
+}
+.file-bar { display: flex; align-items: center; gap: .8rem; margin: .35rem 0; font-size: .78rem; }
+.file-status { color: var(--dim); text-transform: uppercase; letter-spacing: .05em; }
+.file-status[data-status="added"] { color: #2da44e; }
+.file-status[data-status="removed"] { color: #e5534b; }
+.file-status[data-status="modified"], .file-status[data-status="renamed"] { color: #d29922; }
+.file-note { margin: .3rem 0; color: var(--dim); font-size: .8rem; }
+.diff {
+  overflow: auto;
+  max-height: 55vh;
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  font: .75rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.diff .dh { padding: .15rem .5rem; color: var(--dim); background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.diff .dl { display: flex; white-space: pre; }
+.diff .ln { flex: none; width: 3.2em; padding-right: .4em; text-align: right; color: var(--dim); user-select: none; }
+.diff .code { flex: 1; padding-left: .3em; }
+.diff .dl-add { background: color-mix(in srgb, #2da44e 16%, transparent); }
+.diff .dl-del { background: color-mix(in srgb, #e5534b 16%, transparent); }
 @media (max-width: 640px) {
   .el-panel { top: auto; left: .5rem; right: .5rem; bottom: .5rem; width: auto; max-height: 60vh; }
 }
@@ -1151,6 +1177,8 @@ export const pageCsp = (nonce: string, images: "self" | "anywhere"): string =>
     images === "self" ? "img-src 'self'" : "img-src * data:",
     "style-src 'unsafe-inline'",
     `script-src 'nonce-${nonce}'`,
+    // The diff panel asks this server for code; nothing else is reachable.
+    "connect-src 'self'",
     "base-uri 'none'",
     "form-action 'none'",
   ].join("; ");
@@ -1324,8 +1352,10 @@ const ELEMENT_PANEL_HTML = `<aside class="el-panel" id="el-panel" hidden aria-la
     <button type="button" class="btn-icon" id="el-panel-close" aria-label="Close panel (Esc)" title="Close (Esc)">✕</button>
   </div>
   <p class="el-panel-summary" id="el-panel-summary"></p>
-  <h3 class="el-panel-label">Files</h3>
+  <h3 class="el-panel-label">Changes</h3>
+  <p class="el-panel-note" id="el-panel-note"></p>
   <ul class="el-panel-files" id="el-panel-files"></ul>
+  <p class="el-panel-viewer" id="el-panel-viewer"></p>
 </aside>`;
 
 export type ProvenanceInfo = {
@@ -1842,24 +1872,31 @@ function openPanel(key) {
   panelSummary.textContent = el.summary || "";
 
   panelFiles.textContent = "";
-  if (!el.files.length) {
-    var none = document.createElement("li");
-    none.className = "none";
-    none.textContent = "No code is linked to this element.";
-    panelFiles.appendChild(none);
-  }
+  panelViewer.textContent = "";
+  setNote("");
+  fileBodies = [];
+  if (!el.files.length) setNote("No code is linked to this element.");
   for (var i = 0; i < el.files.length; i++) {
     var file = el.files[i];
     var item = document.createElement("li");
+    var head = document.createElement("div");
+    head.className = "file-head";
     var path = document.createElement("code");
     path.textContent = file.path;
-    item.appendChild(path);
+    head.appendChild(path);
     if (file.startLine) {
+      // A real space, so a copied path and its range do not run together.
+      head.appendChild(document.createTextNode(" "));
       var lines = document.createElement("span");
       lines.className = "lines";
       lines.textContent = "L" + file.startLine + (file.endLine && file.endLine !== file.startLine ? "–" + file.endLine : "");
-      item.appendChild(lines);
+      head.appendChild(lines);
     }
+    item.appendChild(head);
+    var body = document.createElement("div");
+    body.className = "file-body";
+    item.appendChild(body);
+    fileBodies.push(body);
     panelFiles.appendChild(item);
   }
 
@@ -1867,6 +1904,192 @@ function openPanel(key) {
   var host = lb && lb.open ? lb : document.body;
   if (panel.parentNode !== host) host.appendChild(panel);
   panel.hidden = false;
+
+  if (el.files.length) loadDiff(key);
+}
+
+var canvasId = parsed.canvasId;
+var panelNote = document.getElementById("el-panel-note");
+var panelViewer = document.getElementById("el-panel-viewer");
+var fileBodies = [];
+var diffRequest = 0;
+
+function setNote(text, link) {
+  panelNote.textContent = text;
+  if (link) {
+    var anchor = document.createElement("a");
+    anchor.href = link.href;
+    anchor.textContent = link.text;
+    panelNote.appendChild(document.createTextNode(" "));
+    panelNote.appendChild(anchor);
+  }
+}
+
+function getDiff(key, full) {
+  var url = "/c/" + encodeURIComponent(canvasId) + "/diff?el=" + encodeURIComponent(key) + (full ? "&full=" + encodeURIComponent(full) : "");
+  return fetch(url, { credentials: "same-origin", headers: { accept: "application/json" } }).then(function(response) {
+    return response.json().catch(function() {
+      return { state: "unavailable", reason: "This server answered " + response.status + "." };
+    });
+  });
+}
+
+// Each request is numbered, so an answer that arrives after the reader moved
+// on to another element is dropped rather than painted over the new one.
+function loadDiff(key) {
+  var mine = ++diffRequest;
+  setNote("Loading the changes…");
+  getDiff(key).then(function(answer) {
+    if (mine !== diffRequest || selectedKey !== key) return;
+    showDiff(key, answer);
+  }, function() {
+    if (mine === diffRequest) setNote("The changes could not be loaded.");
+  });
+}
+
+function showViewer(viewer) {
+  panelViewer.textContent = "";
+  if (!viewer) return;
+  panelViewer.appendChild(document.createTextNode("Signed in to GitHub as @" + viewer + " · "));
+  var out = document.createElement("button");
+  out.type = "button";
+  out.className = "link-button";
+  out.textContent = "Sign out";
+  out.addEventListener("click", function() {
+    fetch("/auth/logout", { method: "POST", credentials: "same-origin" }).then(function() {
+      if (selectedKey) openPanel(selectedKey);
+    });
+  });
+  panelViewer.appendChild(out);
+}
+
+function showDiff(key, answer) {
+  if (answer.state === "signin") {
+    setNote("Sign in to see the code.", { href: answer.loginUrl, text: "Sign in with GitHub" });
+    return;
+  }
+  if (answer.state === "no-access") {
+    setNote("Your GitHub account cannot read " + answer.repo + ".");
+    showViewer(answer.viewer);
+    return;
+  }
+  if (answer.state !== "ok") {
+    setNote(answer.reason || "The changes are not available.");
+    return;
+  }
+  setNote("");
+  showViewer(answer.viewer);
+  for (var i = 0; i < answer.files.length && i < fileBodies.length; i++) {
+    showFile(key, answer.files[i], fileBodies[i]);
+  }
+}
+
+function message(body, text) {
+  var p = document.createElement("p");
+  p.className = "file-note";
+  p.textContent = text;
+  body.appendChild(p);
+}
+
+function showFile(key, file, body) {
+  body.textContent = "";
+  var bar = document.createElement("div");
+  bar.className = "file-bar";
+  var status = document.createElement("span");
+  status.className = "file-status";
+  status.dataset.status = file.status;
+  status.textContent = file.status;
+  bar.appendChild(status);
+
+  var toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "link-button";
+  toggle.textContent = "Whole file";
+  bar.appendChild(toggle);
+
+  var open = document.createElement("a");
+  open.href = file.url;
+  open.target = "_blank";
+  open.rel = "noopener noreferrer";
+  open.textContent = "GitHub";
+  bar.appendChild(open);
+  body.appendChild(bar);
+
+  var view = document.createElement("div");
+  body.appendChild(view);
+  var whole = false;
+
+  function changedLines() {
+    view.textContent = "";
+    if (file.status === "unchanged") return message(view, "This file did not change in this pull request.");
+    if (file.noPatch) return message(view, "GitHub shows no diff for this file: it is binary or too large.");
+    if (!file.hunks.length && file.otherHunks) {
+      return message(view, "No changes in " + (file.range || "these lines") + "; " + file.otherHunks + " elsewhere in the file.");
+    }
+    if (file.otherHunks) message(view, file.otherHunks + " more change" + (file.otherHunks === 1 ? "" : "s") + " elsewhere in the file.");
+    view.appendChild(renderHunks(file.hunks));
+  }
+
+  toggle.addEventListener("click", function() {
+    whole = !whole;
+    toggle.textContent = whole ? "Changed lines" : "Whole file";
+    if (!whole) return changedLines();
+    view.textContent = "";
+    message(view, "Loading the whole file…");
+    getDiff(key, file.path).then(function(answer) {
+      if (!whole) return;
+      view.textContent = "";
+      if (answer.state !== "ok-full") return message(view, answer.reason || "The file is not available.");
+      if (!answer.lines) return message(view, "The file is larger than this panel will show.");
+      view.appendChild(renderWhole(answer.lines));
+    }, function() {
+      if (whole) {
+        view.textContent = "";
+        message(view, "The file could not be loaded.");
+      }
+    });
+  });
+
+  changedLines();
+}
+
+function codeRow(kind, left, right, text) {
+  var row = document.createElement("div");
+  row.className = "dl" + (kind === "+" ? " dl-add" : kind === "-" ? " dl-del" : "");
+  var a = document.createElement("span");
+  a.className = "ln";
+  a.textContent = left === undefined ? "" : String(left);
+  var b = document.createElement("span");
+  b.className = "ln";
+  b.textContent = right === undefined ? "" : String(right);
+  var code = document.createElement("span");
+  code.className = "code";
+  code.textContent = (kind === " " ? " " : kind) + " " + text;
+  row.appendChild(a);
+  row.appendChild(b);
+  row.appendChild(code);
+  return row;
+}
+
+function renderHunks(hunks) {
+  var box = document.createElement("div");
+  box.className = "diff";
+  for (var h = 0; h < hunks.length; h++) {
+    var header = document.createElement("div");
+    header.className = "dh";
+    header.textContent = hunks[h].header;
+    box.appendChild(header);
+    var lines = hunks[h].lines;
+    for (var l = 0; l < lines.length; l++) box.appendChild(codeRow(lines[l].t, lines[l].o, lines[l].n, lines[l].s));
+  }
+  return box;
+}
+
+function renderWhole(lines) {
+  var box = document.createElement("div");
+  box.className = "diff";
+  for (var l = 0; l < lines.length; l++) box.appendChild(codeRow(lines[l].t, undefined, lines[l].n, lines[l].s));
+  return box;
 }
 
 function closePanel() {

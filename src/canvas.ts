@@ -8,6 +8,7 @@ import {
   notFound,
   rateLimited,
   revisionMoved,
+  unauthenticated,
   type Issue,
 } from "./errors.ts";
 import { RateLimiter } from "./ratelimit.ts";
@@ -100,8 +101,20 @@ export class CanvasService {
     this.#pushLimit = new RateLimiter(config.pushesPerMinutePerCanvas, 60_000);
   }
 
-  /** POST /api/canvas */
-  async mint(client: string, origin: string): Promise<Minted> {
+  /**
+   * POST /api/canvas
+   *
+   * With PUSH_TOKENS set, only a bearer among them mints. Checked before the
+   * meter, so a stranger's refused attempts never spend a CI runner's quota.
+   */
+  async mint(client: string, origin: string, bearer: string | undefined): Promise<Minted> {
+    const hashes = this.#config.pushTokenHashes;
+    if (
+      hashes.length > 0 &&
+      (bearer === undefined || !hashes.some((hash) => tokenMatches(bearer, hash)))
+    )
+      throw unauthenticated();
+
     const allowed = this.#mintLimit.take(client);
     if (!allowed.ok)
       throw rateLimited(
