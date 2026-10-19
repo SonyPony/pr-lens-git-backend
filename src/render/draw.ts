@@ -2,6 +2,7 @@ import {
   PrLensRenderError,
   renderAll,
   renderAssetFileName,
+  type RenderAtlas,
 } from "@coldtea/pr-lens-renderer";
 import type { GraphDoc, View } from "@coldtea/pr-lens-schema";
 
@@ -24,6 +25,12 @@ export type DrawnTile = {
   renders: Record<string, string>;
   /** Theme to the file name under /images/{id}/, joined to an origin later. */
   files: Record<string, string>;
+  /**
+   * Where each lane, node, edge and flow step landed, in the picture's viewBox
+   * units. A theme changes colours, never positions, so one atlas serves every
+   * theme. The canvas page reads it; the contract's tiles never carry it.
+   */
+  atlas: RenderAtlas;
 };
 
 export type Drawing = {
@@ -103,6 +110,7 @@ export const draw = (doc: GraphDoc): Drawing => {
         height: drawn.height,
         renders: {},
         files: {},
+        atlas: drawn.atlas,
       };
       byTile.set(key, tile);
       order.push(key);

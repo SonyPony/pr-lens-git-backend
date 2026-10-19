@@ -1052,6 +1052,70 @@ kbd {
   .btn-icon { width: 28px; height: 28px; }
   #lightbox .zoom-pill { bottom: .75rem; right: .75rem; }
 }
+
+/*
+ * Click targets over a diagram. The frame shrink-wraps the picture, so a target
+ * placed in percentages of the frame lands on the element it stands for at any
+ * zoom, with no arithmetic in the script.
+ */
+.hs-frame { position: relative; display: inline-block; line-height: 0; }
+.hs-layer { position: absolute; inset: 0; }
+.hs {
+  position: absolute;
+  margin: 0; padding: 0; border: 0;
+  background: transparent;
+  border-radius: 10px;
+  cursor: pointer;
+}
+.hs:hover, .hs:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.hs.is-selected {
+  outline: 3px solid var(--accent);
+  outline-offset: 3px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.hs-edge { border-radius: 4px; }
+
+.el-panel {
+  position: fixed;
+  top: 1rem; right: 1rem; bottom: 1rem;
+  z-index: 1000;
+  width: min(440px, calc(100vw - 2rem));
+  overflow: auto;
+  padding: 1rem 1.1rem;
+  background: var(--card);
+  color: var(--ink);
+  border: 1px solid var(--edge);
+  border-radius: 12px;
+  box-shadow: 0 12px 35px rgba(0, 0, 0, 0.18);
+}
+.el-panel[hidden] { display: none; }
+.el-panel-head { display: flex; align-items: flex-start; gap: .6rem; }
+.el-panel-heading { flex: 1; min-width: 0; }
+.el-panel-type { display: block; color: var(--dim); font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; }
+.el-panel-title { margin: .1rem 0; font-size: 1.05rem; overflow-wrap: anywhere; }
+.el-panel-sub { color: var(--dim); font-size: .8rem; }
+.el-delta {
+  flex: none;
+  padding: .1rem .5rem;
+  border-radius: 999px;
+  font-size: .72rem;
+  font-weight: 600;
+  border: 1px solid currentColor;
+}
+.el-delta[data-delta="added"] { color: #2da44e; }
+.el-delta[data-delta="modified"] { color: #d29922; }
+.el-delta[data-delta="removed"] { color: #e5534b; }
+.el-delta[data-delta="unchanged"] { color: var(--dim); }
+.el-panel-summary { margin: .8rem 0 0; font-size: .9rem; }
+.el-panel-summary:empty { display: none; }
+.el-panel-label { margin: 1.1rem 0 .4rem; font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
+.el-panel-files { list-style: none; margin: 0; padding: 0; font-size: .85rem; }
+.el-panel-files li { padding: .35rem 0; border-top: 1px solid var(--edge); overflow-wrap: anywhere; }
+.el-panel-files .lines { color: var(--dim); margin-left: .4rem; }
+.el-panel-files .none { color: var(--dim); }
+@media (max-width: 640px) {
+  .el-panel { top: auto; left: .5rem; right: .5rem; bottom: .5rem; width: auto; max-height: 60vh; }
+}
 </style>
 <script nonce="${nonce}">${THEME_BOOT}</script>
 </head>
@@ -1242,6 +1306,27 @@ const HELP_DIALOG_HTML = `<dialog class="help-dialog" id="help-dialog" aria-labe
     </div>
   </div>
 </dialog>`;
+
+/**
+ * The side panel a click on a diagram element opens. Empty here: the script
+ * fills it from the element map, as text, so nothing from a document is ever
+ * parsed as HTML. It moves into the lightbox while the lightbox is open,
+ * because a modal dialog leaves everything outside it inert.
+ */
+const ELEMENT_PANEL_HTML = `<aside class="el-panel" id="el-panel" hidden aria-labelledby="el-panel-title">
+  <div class="el-panel-head">
+    <div class="el-panel-heading">
+      <span class="el-panel-type" id="el-panel-type"></span>
+      <h2 class="el-panel-title" id="el-panel-title"></h2>
+      <span class="el-panel-sub" id="el-panel-sub"></span>
+    </div>
+    <span class="el-delta" id="el-panel-delta"></span>
+    <button type="button" class="btn-icon" id="el-panel-close" aria-label="Close panel (Esc)" title="Close (Esc)">✕</button>
+  </div>
+  <p class="el-panel-summary" id="el-panel-summary"></p>
+  <h3 class="el-panel-label">Files</h3>
+  <ul class="el-panel-files" id="el-panel-files"></ul>
+</aside>`;
 
 export type ProvenanceInfo = {
   mrTitle: string;
@@ -1692,6 +1777,130 @@ function renderTilePicture(tile) {
   return '<picture>' + sourceHtml + '<img src="' + tile.files.light + '" width="' + tile.width + '" height="' + tile.height + '" alt="' + tile.title + '" draggable="false"></picture>';
 }
 
+var elements = parsed.elements || {};
+var hotspots = parsed.hotspots || [];
+var panel = document.getElementById("el-panel");
+var panelType = document.getElementById("el-panel-type");
+var panelTitle = document.getElementById("el-panel-title");
+var panelSub = document.getElementById("el-panel-sub");
+var panelDelta = document.getElementById("el-panel-delta");
+var panelSummary = document.getElementById("el-panel-summary");
+var panelFiles = document.getElementById("el-panel-files");
+var panelClose = document.getElementById("el-panel-close");
+var selectedKey = null;
+
+// Wraps the host's picture in a frame and lays one button per element over it,
+// placed in percentages so the targets follow every pan and zoom for free.
+function attachHotspots(host, index) {
+  var spots = hotspots[index];
+  if (!host || !spots || !spots.length) return;
+  var picture = host.querySelector("picture");
+  if (!picture) return;
+  var frame = document.createElement("div");
+  frame.className = "hs-frame";
+  picture.parentNode.insertBefore(frame, picture);
+  frame.appendChild(picture);
+  var layer = document.createElement("div");
+  layer.className = "hs-layer";
+  for (var i = 0; i < spots.length; i++) {
+    var spot = spots[i];
+    var el = elements[spot.key];
+    if (!el) continue;
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "hs hs-" + el.element + (spot.key === selectedKey ? " is-selected" : "");
+    button.dataset.el = spot.key;
+    button.title = el.label;
+    button.setAttribute("aria-label", "Show changes for " + el.label);
+    button.style.left = (spot.x * 100) + "%";
+    button.style.top = (spot.y * 100) + "%";
+    button.style.width = (spot.w * 100) + "%";
+    button.style.height = (spot.h * 100) + "%";
+    layer.appendChild(button);
+  }
+  frame.appendChild(layer);
+}
+
+function markSelected() {
+  var all = document.querySelectorAll(".hs");
+  for (var i = 0; i < all.length; i++) {
+    all[i].classList.toggle("is-selected", all[i].dataset.el === selectedKey);
+  }
+}
+
+function openPanel(key) {
+  var el = elements[key];
+  if (!el || !panel) return;
+  selectedKey = key;
+  markSelected();
+
+  panelType.textContent = el.element === "edge" ? "Connection · " + el.type : "Component · " + el.type;
+  panelTitle.textContent = el.label;
+  panelSub.textContent = el.element === "edge" ? el.from + " → " + el.to : "";
+  panelDelta.textContent = el.delta;
+  panelDelta.dataset.delta = el.delta;
+  panelSummary.textContent = el.summary || "";
+
+  panelFiles.textContent = "";
+  if (!el.files.length) {
+    var none = document.createElement("li");
+    none.className = "none";
+    none.textContent = "No code is linked to this element.";
+    panelFiles.appendChild(none);
+  }
+  for (var i = 0; i < el.files.length; i++) {
+    var file = el.files[i];
+    var item = document.createElement("li");
+    var path = document.createElement("code");
+    path.textContent = file.path;
+    item.appendChild(path);
+    if (file.startLine) {
+      var lines = document.createElement("span");
+      lines.className = "lines";
+      lines.textContent = "L" + file.startLine + (file.endLine && file.endLine !== file.startLine ? "–" + file.endLine : "");
+      item.appendChild(lines);
+    }
+    panelFiles.appendChild(item);
+  }
+
+  // A modal dialog makes everything outside it inert, so the panel goes where the reader is.
+  var host = lb && lb.open ? lb : document.body;
+  if (panel.parentNode !== host) host.appendChild(panel);
+  panel.hidden = false;
+}
+
+function closePanel() {
+  if (!panel || panel.hidden) return false;
+  panel.hidden = true;
+  selectedKey = null;
+  markSelected();
+  return true;
+}
+
+if (panelClose) panelClose.addEventListener("click", closePanel);
+
+// The pan and zoom handlers capture the pointer on the stage, so a hotspot never
+// sees its own click. A press and release on a hotspot with almost no movement
+// between them is a tap; anything longer was a drag and stays a pan.
+var tap = null;
+document.addEventListener("pointerdown", function(e) {
+  var spot = e.target.closest ? e.target.closest(".hs") : null;
+  tap = spot && e.button === 0 ? { key: spot.dataset.el, x: e.clientX, y: e.clientY, id: e.pointerId } : null;
+}, true);
+document.addEventListener("pointerup", function(e) {
+  if (!tap || tap.id !== e.pointerId) return;
+  var key = tap.key;
+  var moved = Math.hypot(e.clientX - tap.x, e.clientY - tap.y);
+  tap = null;
+  if (moved < 5) openPanel(key);
+}, true);
+// Enter or Space on a focused hotspot: a click with no pointer behind it.
+document.addEventListener("click", function(e) {
+  if (e.detail !== 0) return;
+  var spot = e.target.closest ? e.target.closest(".hs") : null;
+  if (spot) openPanel(spot.dataset.el);
+}, true);
+
 function showLbDiagram(index) {
   if (index < 0) index = tiles.length - 1;
   if (index >= tiles.length) index = 0;
@@ -1705,6 +1914,7 @@ function showLbDiagram(index) {
 
   if (lbCanvas) {
     lbCanvas.innerHTML = renderTilePicture(tile);
+    attachHotspots(lbCanvas, lbIndex);
   }
 
   requestAnimationFrame(function() {
@@ -1727,6 +1937,7 @@ function closeLightbox() {
 
 if (lb) {
   lb.addEventListener("close", function() {
+    closePanel();
     if (lastActiveElement && typeof lastActiveElement.focus === "function") {
       lastActiveElement.focus();
     }
@@ -1796,6 +2007,8 @@ function applyCvTransform() {
 }
 
 var cvCtrl = wirePanZoom(cvStage, function() { return cvTransform; }, applyCvTransform);
+// The first diagram arrives drawn by the server, so it gets its targets here.
+attachHotspots(cvBody, cvIndex);
 if (currentMode === "canvas") {
   fitCanvas(1.0, true);
   if (cvContainer) cvContainer.classList.add("is-ready");
@@ -1851,6 +2064,7 @@ function showCanvasDiagram(index) {
 
   if (cvBody) {
     cvBody.innerHTML = renderTilePicture(tile);
+    attachHotspots(cvBody, cvIndex);
   }
 
   fitCanvas(1.0, true);
@@ -1894,6 +2108,12 @@ window.addEventListener("keydown", function(e) {
   }
 
   if (e.key === "Escape") {
+    // The panel sits on top of everything, so it is the first thing Esc closes;
+    // preventDefault stops a dialog under it from cancelling on the same key.
+    if (closePanel()) {
+      e.preventDefault();
+      return;
+    }
     if (helpDialog && helpDialog.open) {
       helpDialog.close();
       return;
@@ -1954,6 +2174,99 @@ export type CanvasPageOptions = {
   demoSample?: string;
 };
 
+type GraphDocument = NonNullable<Canvas["document"]>;
+type FileRef = GraphDocument["nodes"][number]["files"][number];
+
+/** What the side panel shows for one element; built from the stored document. */
+export type ClickableElement = {
+  element: "node" | "edge";
+  id: string;
+  label: string;
+  /** The node's or the edge's own kind, e.g. `module` or `http`. */
+  type: string;
+  delta: string;
+  summary: string | undefined;
+  files: FileRef[];
+  /** Edges only: the labels of the two ends. */
+  from?: string;
+  to?: string;
+};
+
+/**
+ * Everything a click on a diagram can open, keyed `node:{id}` and `edge:{id}`,
+ * since a node and an edge may share an id. Every node is clickable. An edge
+ * only when it names the code it stands for: its atlas box bounds the whole
+ * curve, so an edge with nothing to show would only steal clicks from the
+ * space around it.
+ */
+export const clickableElements = (
+  document: Canvas["document"],
+): Record<string, ClickableElement> => {
+  const elements: Record<string, ClickableElement> = {};
+  if (document === undefined) return elements;
+
+  const labels = new Map(document.nodes.map((node) => [node.id, node.label]));
+  for (const node of document.nodes) {
+    elements[`node:${node.id}`] = {
+      element: "node",
+      id: node.id,
+      label: node.label,
+      type: node.kind,
+      delta: node.delta,
+      summary: node.summary,
+      files: node.files,
+    };
+  }
+  for (const edge of document.edges) {
+    if (edge.files.length === 0) continue;
+    elements[`edge:${edge.id}`] = {
+      element: "edge",
+      id: edge.id,
+      label: edge.label ?? `${labels.get(edge.from) ?? edge.from} → ${labels.get(edge.to) ?? edge.to}`,
+      type: edge.kind,
+      delta: edge.delta,
+      summary: edge.summary,
+      files: edge.files,
+      from: labels.get(edge.from) ?? edge.from,
+      to: labels.get(edge.to) ?? edge.to,
+    };
+  }
+  return elements;
+};
+
+/** A click target on one tile, as fractions of the tile so it scales with any zoom. */
+export type Hotspot = { key: string; x: number; y: number; w: number; h: number };
+
+const fraction = (value: number, of: number): number =>
+  Math.round((value / of) * 100000) / 100000;
+
+/**
+ * The click targets of one tile, edges first so a node drawn over an edge's
+ * bounding box stays on top of it and wins the click.
+ */
+export const hotspotsOf = (
+  tile: Canvas["drawing"]["tiles"][number],
+  elements: Record<string, ClickableElement>,
+): Hotspot[] => {
+  const spots: Hotspot[] = [];
+  const add = (prefix: "node" | "edge", boxes: Record<string, { x: number; y: number; width: number; height: number }>) => {
+    for (const [id, box] of Object.entries(boxes)) {
+      const key = `${prefix}:${id}`;
+      if (!(key in elements)) continue;
+      spots.push({
+        key,
+        x: fraction(box.x, tile.width),
+        y: fraction(box.y, tile.height),
+        w: fraction(box.width, tile.width),
+        h: fraction(box.height, tile.height),
+      });
+    }
+  };
+  add("edge", tile.atlas.edges);
+  add("node", tile.atlas.nodes);
+  return spots;
+};
+
 /** No origin: every address on this page is a path, and resolves against the reader's own. */
 export const canvasPage = (
   canvas: Canvas,
@@ -2006,10 +2319,14 @@ export const canvasPage = (
     },
   }));
 
+  const elements = clickableElements(canvas.document);
+
   const canvasPayload = {
     canvasId: canvas.id,
     title: mrTitle,
     tiles: tilesData,
+    elements,
+    hotspots: tiles.map((tile) => hotspotsOf(tile, elements)),
   };
 
   const canvasDataJson = JSON.stringify(canvasPayload).replace(/</g, "\\u003c");
@@ -2046,6 +2363,7 @@ ${body}
 ${canvasWorkspace}
 ${LIGHTBOX_HTML}
 ${HELP_DIALOG_HTML}
+${ELEMENT_PANEL_HTML}
 <script id="pr-lens-data" type="application/json">${canvasDataJson}</script>
 <script id="pr-lens-tiles" type="application/json">${tilesJson}</script>
 <script nonce="${nonce}">${INTERACTIVE_WIRING}</script>`,
