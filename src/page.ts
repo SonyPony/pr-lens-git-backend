@@ -1077,37 +1077,32 @@ kbd {
 }
 
 /*
- * A block on hover or when selected: a card in its change's colour, drawn over
- * the picture's own card with the label in white. Sizes are in container units
- * of the button, which is the block's own box, so the card follows any zoom.
+ * A block on hover or when selected keeps everything it shows: only its colours
+ * change. The picture is inline, so its own card takes the change colour, the
+ * icon and text turn white, and the tag, drawn last, stays on top untouched.
  */
-.hs-node { container-type: size; }
-.hs-node[data-delta="added"] { --hs-colour: #1f883d; }
-.hs-node[data-delta="modified"] { --hs-colour: #9a6700; }
-.hs-node[data-delta="removed"] { --hs-colour: #cf222e; }
-.hs-node[data-delta="unchanged"] { --hs-colour: #59636e; }
-.hs-face {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 4cqh;
-  box-sizing: border-box;
-  background: var(--hs-colour, var(--accent));
-  color: #ffffff;
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  line-height: 1.15;
-  text-align: left;
-  opacity: 0;
-  transition: opacity .12s ease;
+.hs-frame > svg { display: block; pointer-events: none; }
+.canvas-diagram-body .hs-frame > svg {
+  border-radius: 12px;
+  box-shadow: 0 12px 35px rgba(0, 0, 0, 0.14), 0 2px 6px rgba(0, 0, 0, 0.08);
 }
-.hs-face > span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.hs-face .hs-title { font-weight: 700; }
-.hs-face .hs-sub { opacity: .9; }
-.hs-node:hover .hs-face, .hs-node:focus-visible .hs-face, .hs-node.is-selected .hs-face { opacity: 1; }
-.hs-node.is-selected .hs-face { box-shadow: 0 0 0 3px color-mix(in srgb, var(--hs-colour) 35%, transparent); }
-.hs-node:focus-visible { outline: none; }
+.cardsh[data-delta="added"] { --hs-colour: #1f883d; }
+.cardsh[data-delta="modified"] { --hs-colour: #9a6700; }
+.cardsh[data-delta="removed"] { --hs-colour: #cf222e; }
+.cardsh[data-delta="unchanged"] { --hs-colour: #59636e; }
+.cardsh.hot { opacity: 1; }
+.cardsh.hot > .card { fill: var(--hs-colour); stroke: var(--hs-colour); stroke-opacity: 1; }
+.cardsh.hot > .chip { fill: rgba(255, 255, 255, 0.2); }
+.cardsh.hot .glyph, .cardsh.hot > .ntitle, .cardsh.hot > .nsub { fill: #ffffff; }
+.cardsh.selected { filter: drop-shadow(0 0 4px var(--hs-colour)); }
+/* Dark tags are see-through, so on a coloured card the tag gets a solid pill. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .cardsh.hot .bdg rect { fill: #ffffff; stroke: transparent; }
+  :root:not([data-theme="light"]) .cardsh.hot .bdg text { fill: var(--hs-colour); }
+}
+:root[data-theme="dark"] .cardsh.hot .bdg rect { fill: #ffffff; stroke: transparent; }
+:root[data-theme="dark"] .cardsh.hot .bdg text { fill: var(--hs-colour); }
+.hs-node:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 
 .el-panel {
   position: fixed;
@@ -1952,42 +1947,146 @@ function attachHotspots(host, index) {
     button.style.top = (spot.y * 100) + "%";
     button.style.width = (spot.w * 100) + "%";
     button.style.height = (spot.h * 100) + "%";
-    if (el.element === "node") {
-      button.dataset.delta = el.delta;
-      button.appendChild(blockFace(el, spot.w * tiles[index].width, spot.h * tiles[index].height));
-    }
     layer.appendChild(button);
   }
   frame.appendChild(layer);
+  inlinePicture(frame, index);
 }
 
-// The card shown over a block on hover and selection. Its corner, padding and
-// type sizes are the renderer's own (10 radius, 14 padding, 13 bold title, 9.5
-// subtitle, in picture units), turned into fractions of this block's box so the
-// card lines up with the picture's card at any zoom.
-function blockFace(el, boxWidth, boxHeight) {
-  var face = document.createElement("span");
-  face.className = "hs-face";
-  face.setAttribute("aria-hidden", "true");
-  face.style.borderRadius = (10 / boxWidth * 100) + "% / " + (10 / boxHeight * 100) + "%";
-  face.style.padding = "0 " + (14 / boxWidth * 100) + "cqw";
-  var title = document.createElement("span");
-  title.className = "hs-title";
-  title.textContent = el.label;
-  title.style.fontSize = (13 / boxHeight * 100) + "cqh";
-  var sub = document.createElement("span");
-  sub.className = "hs-sub";
-  sub.textContent = el.type + " · " + el.delta;
-  sub.style.fontSize = (9.5 / boxHeight * 100) + "cqh";
-  face.appendChild(title);
-  face.appendChild(sub);
-  return face;
+// The picture as inline SVG, so a block can be recoloured in place. Until it
+// arrives the <img> stays, so nothing flickers; a failed fetch keeps the <img>.
+var svgTexts = {};
+function svgText(url) {
+  if (!svgTexts[url]) {
+    svgTexts[url] = fetch(url, { credentials: "same-origin" }).then(function(response) {
+      if (!response.ok) throw new Error("picture " + response.status);
+      return response.text();
+    });
+    svgTexts[url].catch(function() { delete svgTexts[url]; });
+  }
+  return svgTexts[url];
+}
+
+function isDark() {
+  var theme = document.documentElement.dataset.theme;
+  if (theme === "dark") return true;
+  if (theme === "light") return false;
+  return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
+
+function inlinePicture(frame, index) {
+  var tile = tiles[index];
+  var url = isDark() && tile.files.dark ? tile.files.dark : tile.files.light;
+  frame.dataset.tile = String(index);
+  frame.dataset.src = url;
+  svgText(url).then(function(text) {
+    if (frame.dataset.src !== url || !frame.isConnected) return;
+    var parsed = new DOMParser().parseFromString(text, "image/svg+xml").documentElement;
+    if (!parsed || parsed.nodeName.toLowerCase() !== "svg") return;
+    // The renderer draws no script; drop any all the same.
+    var risky = parsed.querySelectorAll("script, foreignObject");
+    for (var r = 0; r < risky.length; r++) risky[r].remove();
+    var svg = document.importNode(parsed, true);
+    svg.setAttribute("width", String(tile.width));
+    svg.setAttribute("height", String(tile.height));
+    svg.setAttribute("aria-label", tile.title);
+    svg.setAttribute("role", "img");
+    var old = frame.querySelector("picture, svg");
+    if (old) frame.replaceChild(svg, old);
+    linkCards(frame, svg, index);
+    markSelected();
+  }, function() {});
+}
+
+// Each block's card is the rect whose box is exactly the atlas box; its group
+// is what gets recoloured. Keys go on the group so hover and selection find it.
+function linkCards(frame, svg, index) {
+  var tile = tiles[index];
+  var cards = svg.querySelectorAll(".cardsh > .card");
+  var spots = hotspots[index] || [];
+  for (var i = 0; i < spots.length; i++) {
+    var spot = spots[i];
+    var el = elements[spot.key];
+    if (!el || el.element !== "node") continue;
+    var x = spot.x * tile.width, y = spot.y * tile.height, w = spot.w * tile.width, h = spot.h * tile.height;
+    for (var c = 0; c < cards.length; c++) {
+      var card = cards[c];
+      var shift = shiftOf(card, svg);
+      if (Math.abs(card.getAttribute("x") - x + shift.x) < 0.5 && Math.abs(card.getAttribute("y") - y + shift.y) < 0.5 &&
+          Math.abs(card.getAttribute("width") - w) < 0.5 && Math.abs(card.getAttribute("height") - h) < 0.5) {
+        card.parentNode.dataset.el = spot.key;
+        card.parentNode.dataset.delta = el.delta;
+        break;
+      }
+    }
+  }
+}
+
+// The atlas is in the picture's own units, but a card may sit inside groups
+// moved by translate(): a flow is drawn inside one. Their sum is the card's shift.
+function shiftOf(node, root) {
+  var shift = { x: 0, y: 0 };
+  for (var at = node.parentNode; at && at !== root; at = at.parentNode) {
+    // Parsed by hand: this script lives in a template string, where a regex's
+    // backslashes would not survive.
+    var transform = (at.getAttribute && at.getAttribute("transform")) || "";
+    var open = transform.indexOf("translate(");
+    if (open !== -1) {
+      var parts = transform.slice(open + 10, transform.indexOf(")", open)).trim().split(/[ ,]+/);
+      shift.x += Number(parts[0]) || 0;
+      shift.y += Number(parts[1]) || 0;
+    }
+  }
+  return shift;
+}
+
+function cardsFor(key, scope) {
+  var found = [];
+  var groups = (scope || document).querySelectorAll(".cardsh[data-el]");
+  for (var g = 0; g < groups.length; g++) if (groups[g].dataset.el === key) found.push(groups[g]);
+  return found;
+}
+
+function heat(button, on) {
+  var frame = button.closest(".hs-frame");
+  var cards = cardsFor(button.dataset.el, frame);
+  for (var i = 0; i < cards.length; i++) cards[i].classList.toggle("hot", on || button.dataset.el === selectedKey);
+}
+
+document.addEventListener("pointerover", function(e) {
+  var spot = e.target.closest ? e.target.closest(".hs-node") : null;
+  if (spot) heat(spot, true);
+});
+document.addEventListener("pointerout", function(e) {
+  var spot = e.target.closest ? e.target.closest(".hs-node") : null;
+  if (spot) heat(spot, false);
+});
+document.addEventListener("focusin", function(e) {
+  if (e.target.classList && e.target.classList.contains("hs-node")) heat(e.target, true);
+});
+document.addEventListener("focusout", function(e) {
+  if (e.target.classList && e.target.classList.contains("hs-node")) heat(e.target, false);
+});
+
+// A theme switch swaps every inlined picture for its other half, in place.
+function reinline() {
+  var frames = document.querySelectorAll(".hs-frame[data-tile]");
+  for (var f = 0; f < frames.length; f++) inlinePicture(frames[f], parseInt(frames[f].dataset.tile, 10));
+}
+new MutationObserver(reinline).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+if (window.matchMedia) {
+  var darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+  if (darkQuery.addEventListener) darkQuery.addEventListener("change", reinline);
 }
 
 function markSelected() {
   for (var i = 0; i < selectedButtons.length; i++) selectedButtons[i].classList.remove("is-selected");
   selectedButtons = [];
+  var lit = document.querySelectorAll(".cardsh.selected");
+  for (var k = 0; k < lit.length; k++) lit[k].classList.remove("selected", "hot");
   if (!selectedKey) return;
+  var cards = cardsFor(selectedKey);
+  for (var m = 0; m < cards.length; m++) cards[m].classList.add("selected", "hot");
   var all = document.querySelectorAll(".hs");
   for (var j = 0; j < all.length; j++) {
     if (all[j].dataset.el !== selectedKey) continue;
