@@ -1068,13 +1068,46 @@ kbd {
   border-radius: 10px;
   cursor: pointer;
 }
-.hs:hover, .hs:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.hs.is-selected {
+.hs-edge { border-radius: 4px; }
+.hs-edge:hover, .hs-edge:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.hs-edge.is-selected {
   outline: 3px solid var(--accent);
   outline-offset: 3px;
   background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
-.hs-edge { border-radius: 4px; }
+
+/*
+ * A block on hover or when selected: a card in its change's colour, drawn over
+ * the picture's own card with the label in white. Sizes are in container units
+ * of the button, which is the block's own box, so the card follows any zoom.
+ */
+.hs-node { container-type: size; }
+.hs-node[data-delta="added"] { --hs-colour: #1f883d; }
+.hs-node[data-delta="modified"] { --hs-colour: #9a6700; }
+.hs-node[data-delta="removed"] { --hs-colour: #cf222e; }
+.hs-node[data-delta="unchanged"] { --hs-colour: #59636e; }
+.hs-face {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4cqh;
+  box-sizing: border-box;
+  background: var(--hs-colour, var(--accent));
+  color: #ffffff;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  line-height: 1.15;
+  text-align: left;
+  opacity: 0;
+  transition: opacity .12s ease;
+}
+.hs-face > span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.hs-face .hs-title { font-weight: 700; }
+.hs-face .hs-sub { opacity: .9; }
+.hs-node:hover .hs-face, .hs-node:focus-visible .hs-face, .hs-node.is-selected .hs-face { opacity: 1; }
+.hs-node.is-selected .hs-face { box-shadow: 0 0 0 3px color-mix(in srgb, var(--hs-colour) 35%, transparent); }
+.hs-node:focus-visible { outline: none; }
 
 .el-panel {
   position: fixed;
@@ -1919,9 +1952,36 @@ function attachHotspots(host, index) {
     button.style.top = (spot.y * 100) + "%";
     button.style.width = (spot.w * 100) + "%";
     button.style.height = (spot.h * 100) + "%";
+    if (el.element === "node") {
+      button.dataset.delta = el.delta;
+      button.appendChild(blockFace(el, spot.w * tiles[index].width, spot.h * tiles[index].height));
+    }
     layer.appendChild(button);
   }
   frame.appendChild(layer);
+}
+
+// The card shown over a block on hover and selection. Its corner, padding and
+// type sizes are the renderer's own (10 radius, 14 padding, 13 bold title, 9.5
+// subtitle, in picture units), turned into fractions of this block's box so the
+// card lines up with the picture's card at any zoom.
+function blockFace(el, boxWidth, boxHeight) {
+  var face = document.createElement("span");
+  face.className = "hs-face";
+  face.setAttribute("aria-hidden", "true");
+  face.style.borderRadius = (10 / boxWidth * 100) + "% / " + (10 / boxHeight * 100) + "%";
+  face.style.padding = "0 " + (14 / boxWidth * 100) + "cqw";
+  var title = document.createElement("span");
+  title.className = "hs-title";
+  title.textContent = el.label;
+  title.style.fontSize = (13 / boxHeight * 100) + "cqh";
+  var sub = document.createElement("span");
+  sub.className = "hs-sub";
+  sub.textContent = el.type + " · " + el.delta;
+  sub.style.fontSize = (9.5 / boxHeight * 100) + "cqh";
+  face.appendChild(title);
+  face.appendChild(sub);
+  return face;
 }
 
 function markSelected() {
