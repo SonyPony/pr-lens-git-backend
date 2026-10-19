@@ -1126,19 +1126,71 @@ kbd {
 .file-status[data-status="removed"] { color: #e5534b; }
 .file-status[data-status="modified"], .file-status[data-status="renamed"] { color: #d29922; }
 .file-note { margin: .3rem 0; color: var(--dim); font-size: .8rem; }
+/*
+ * The diff, in GitHub's own colours: its light and dark diff palettes, and the
+ * github-light / github-dark syntax themes the server highlighted with. Each
+ * token carries both colours as variables; the theme decides which one shows.
+ */
 .diff {
+  --diff-bg: #ffffff;
+  --diff-fg: #1f2328;
+  --diff-ln: #59636e;
+  --diff-add-bg: #dafbe1;
+  --diff-add-gutter: #aceebb;
+  --diff-del-bg: #ffebe9;
+  --diff-del-gutter: #ffcecb;
+  --diff-hunk-bg: #ddf4ff;
+  --diff-hunk-fg: #59636e;
   overflow: auto;
   max-height: 55vh;
   border: 1px solid var(--edge);
-  border-radius: 8px;
-  font: .75rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  border-radius: 6px;
+  background: var(--diff-bg);
+  color: var(--diff-fg);
+  font: 12px/20px ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
-.diff .dh { padding: .15rem .5rem; color: var(--dim); background: color-mix(in srgb, var(--accent) 7%, transparent); }
-.diff .dl { display: flex; white-space: pre; }
-.diff .ln { flex: none; width: 3.2em; padding-right: .4em; text-align: right; color: var(--dim); user-select: none; }
-.diff .code { flex: 1; padding-left: .3em; }
-.diff .dl-add { background: color-mix(in srgb, #2da44e 16%, transparent); }
-.diff .dl-del { background: color-mix(in srgb, #e5534b 16%, transparent); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .diff {
+    --diff-bg: #0d1117;
+    --diff-fg: #e6edf3;
+    --diff-ln: #9198a1;
+    --diff-add-bg: rgba(46, 160, 67, 0.15);
+    --diff-add-gutter: rgba(63, 185, 80, 0.3);
+    --diff-del-bg: rgba(248, 81, 73, 0.1);
+    --diff-del-gutter: rgba(248, 81, 73, 0.3);
+    --diff-hunk-bg: rgba(56, 139, 253, 0.1);
+    --diff-hunk-fg: #9198a1;
+  }
+  :root:not([data-theme="light"]) .diff .code span { color: var(--shd, inherit); }
+}
+:root[data-theme="dark"] .diff {
+  --diff-bg: #0d1117;
+  --diff-fg: #e6edf3;
+  --diff-ln: #9198a1;
+  --diff-add-bg: rgba(46, 160, 67, 0.15);
+  --diff-add-gutter: rgba(63, 185, 80, 0.3);
+  --diff-del-bg: rgba(248, 81, 73, 0.1);
+  --diff-del-gutter: rgba(248, 81, 73, 0.3);
+  --diff-hunk-bg: rgba(56, 139, 253, 0.1);
+  --diff-hunk-fg: #9198a1;
+}
+.diff .dh { padding: 0 .6rem; color: var(--diff-hunk-fg); background: var(--diff-hunk-bg); }
+.diff .dl { display: flex; white-space: pre; min-width: max-content; }
+.diff .ln {
+  flex: none; width: 3.4em; padding: 0 .5em;
+  text-align: right; color: var(--diff-ln); user-select: none;
+}
+.diff .sign { flex: none; width: 1.4em; padding-left: .3em; user-select: none; }
+.diff .code { flex: 1; padding-right: .8em; }
+.diff .code span { color: var(--shl, inherit); }
+:root[data-theme="dark"] .diff .code span { color: var(--shd, inherit); }
+.diff .dl-add { background: var(--diff-add-bg); }
+.diff .dl-add .ln { background: var(--diff-add-gutter); }
+.diff .dl-del { background: var(--diff-del-bg); }
+.diff .dl-del .ln { background: var(--diff-del-gutter); }
+.diff .tk-i { font-style: italic; }
+.diff .tk-b { font-weight: 600; }
+.diff .tk-u { text-decoration: underline; }
 @media (max-width: 640px) {
   .el-panel { top: auto; left: .5rem; right: .5rem; bottom: .5rem; width: auto; max-height: 60vh; }
 }
@@ -2053,7 +2105,10 @@ function showFile(key, file, body) {
   changedLines();
 }
 
-function codeRow(kind, left, right, text) {
+// A token is [text] in the default colour, or [text, light, dark, style] where
+// style is 1 italic, 2 bold, 4 underline. Colours travel as CSS variables so the
+// theme switch recolours the code without fetching it again.
+function codeRow(kind, left, right, text, tokens) {
   var row = document.createElement("div");
   row.className = "dl" + (kind === "+" ? " dl-add" : kind === "-" ? " dl-del" : "");
   var a = document.createElement("span");
@@ -2062,11 +2117,31 @@ function codeRow(kind, left, right, text) {
   var b = document.createElement("span");
   b.className = "ln";
   b.textContent = right === undefined ? "" : String(right);
+  var sign = document.createElement("span");
+  sign.className = "sign";
+  sign.textContent = kind === " " ? " " : kind;
   var code = document.createElement("span");
   code.className = "code";
-  code.textContent = (kind === " " ? " " : kind) + " " + text;
+  if (tokens && tokens.length) {
+    for (var i = 0; i < tokens.length; i++) {
+      var token = tokens[i];
+      var piece = document.createElement("span");
+      piece.textContent = token[0];
+      if (token.length > 1) {
+        piece.style.setProperty("--shl", token[1]);
+        piece.style.setProperty("--shd", token[2]);
+        if (token[3] & 1) piece.classList.add("tk-i");
+        if (token[3] & 2) piece.classList.add("tk-b");
+        if (token[3] & 4) piece.classList.add("tk-u");
+      }
+      code.appendChild(piece);
+    }
+  } else {
+    code.textContent = text;
+  }
   row.appendChild(a);
   row.appendChild(b);
+  row.appendChild(sign);
   row.appendChild(code);
   return row;
 }
@@ -2080,7 +2155,7 @@ function renderHunks(hunks) {
     header.textContent = hunks[h].header;
     box.appendChild(header);
     var lines = hunks[h].lines;
-    for (var l = 0; l < lines.length; l++) box.appendChild(codeRow(lines[l].t, lines[l].o, lines[l].n, lines[l].s));
+    for (var l = 0; l < lines.length; l++) box.appendChild(codeRow(lines[l].t, lines[l].o, lines[l].n, lines[l].s, lines[l].h));
   }
   return box;
 }
@@ -2088,7 +2163,10 @@ function renderHunks(hunks) {
 function renderWhole(lines) {
   var box = document.createElement("div");
   box.className = "diff";
-  for (var l = 0; l < lines.length; l++) box.appendChild(codeRow(lines[l].t, undefined, lines[l].n, lines[l].s));
+  for (var l = 0; l < lines.length; l++) {
+    var line = lines[l];
+    box.appendChild(codeRow(line.t, line.t === "-" ? line.o : undefined, line.n, line.s, line.h));
+  }
   return box;
 }
 

@@ -8,6 +8,7 @@ import { parseGraphDoc } from "@coldtea/pr-lens-schema";
 
 import { loadConfig } from "../src/config.ts";
 import { hunksInRange, parsePatch, wholeFile } from "../src/diff.ts";
+import { highlight, languageOf } from "../src/highlight.ts";
 import { call, start, type Harness } from "./harness.ts";
 
 /**
@@ -31,6 +32,14 @@ const API_PATCH = [
 ].join("\n");
 
 const API_HEAD = ["import cache", "new = 1", "extra = 2", "keep", "keep2"].join("\n") + "\n";
+const API_BASE = ["import cache", "old = 1", "keep", "keep2"].join("\n") + "\n";
+
+/** File contents the fake serves, by `path@ref`. */
+const CONTENTS: Record<string, string> = {
+  "src/api.py@bbb2222": API_HEAD,
+  "src/api.py@aaa1111": API_BASE,
+  "src/cache.py@bbb2222": "a\nb\nc\n",
+};
 
 type Fake = {
   url: string;
@@ -82,9 +91,11 @@ const fakeGitHub = async (): Promise<Fake> => {
           { filename: "assets/logo.png", status: "modified" },
         ],
       });
-    if (url.pathname === "/repos/acme/shop/contents/src/api.py" && url.searchParams.get("ref") === "bbb2222") {
+    const content = /^\/repos\/acme\/shop\/contents\/(.+)$/.exec(url.pathname);
+    const text = content ? CONTENTS[`${content[1]}@${url.searchParams.get("ref")}`] : undefined;
+    if (text !== undefined) {
       res.writeHead(200, { "content-type": "text/plain" });
-      res.end(API_HEAD);
+      res.end(text);
       return;
     }
     json(404, {});
@@ -189,6 +200,23 @@ describe("the diff behind an element, with a dev token", () => {
       [" import cache", "-old = 1", "+new = 1", "+extra = 2", " keep", " keep2"],
     );
     assert.equal(file.url, `${github.url}/acme/shop/blob/bbb2222/src/api.py`);
+  });
+
+  it("colours each line from its own side's file, in GitHub's themes", async () => {
+    const [file] = (await diffOf(harness, id, "node:api")).body.files;
+    const lines = file.hunks[0].lines as Array<{ t: string; s: string; h?: unknown[][] }>;
+    for (const line of lines) {
+      assert.ok(Array.isArray(line.h), `"${line.s}" has no colours`);
+      assert.equal(line.h.map((token) => token[0]).join(""), line.s, "the tokens spell the line");
+    }
+    // `import` is a keyword in github-light: a coloured token, not the default.
+    const keyword = lines[0]?.h?.find((token) => token[0] === "import");
+    assert.equal(keyword?.length, 4);
+
+    const whole = await diffOf(harness, id, "node:api", "&full=src/api.py");
+    const removed = whole.body.lines.find((line: { t: string }) => line.t === "-");
+    assert.equal(removed.o, 2);
+    assert.ok(Array.isArray(removed.h), "a removed line takes its colours from the old file");
   });
 
   it("shows every hunk when the document names no range", async () => {
@@ -391,6 +419,27 @@ describe("the sign-in settings", () => {
       () => load({ GITHUB_APP_CLIENT_ID: "a", GITHUB_APP_CLIENT_SECRET: "b", SESSION_KEY: "c2hvcnQ=" }),
       /32 random bytes/,
     );
+  });
+});
+
+describe("highlighting", () => {
+  it("knows a language by extension or by name, and leaves the rest plain", () => {
+    assert.equal(languageOf("src/app.py"), "py");
+    assert.equal(languageOf("web/App.TSX"), "tsx");
+    assert.equal(languageOf("Dockerfile"), "docker");
+    assert.equal(languageOf("notes.unknownext"), undefined);
+    assert.equal(languageOf("LICENSE"), undefined);
+  });
+
+  it("gives one token list per line, with both themes' colours", async () => {
+    const lines = await highlight("a.py", "def f():\n    return 1\n");
+    assert.equal(lines?.length, 2);
+    const def = lines?.[0]?.find((token) => token[0] === "def");
+    assert.deepEqual(def?.slice(1, 3), ["#D73A49", "#F97583"]);
+  });
+
+  it("returns nothing for a language it does not know", async () => {
+    assert.equal(await highlight("data.unknownext", "x"), undefined);
   });
 });
 

@@ -51,7 +51,8 @@
   "dependencies": {
     "@coldtea/pr-lens-renderer": "^0.3.2",
     "@coldtea/pr-lens-schema": "^0.7.0",
-    "marked": "^18.0.13"
+    "marked": "^18.0.13",
+    "shiki": "^4.5.0"
   },
   "devDependencies": {
     "@types/node": "^26.5.1",
